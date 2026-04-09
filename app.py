@@ -668,15 +668,27 @@ ALWAYS respond with ONLY valid JSON array."""
 def merge_results(tagged, batch, parsed):
     for j, td in enumerate(parsed):
         if j < len(batch):
-            m = {**batch[j], **td}; m['monitor_date'] = batch[j].get('monitor_date','')
-            # Preserve original URL from parser if AI didn't return one
-            if not m.get('url'): m['url'] = batch[j].get('url','')
-            # Preserve original headline from parser if AI returned empty
-            if not m.get('headline') or not m['headline'].strip():
-                m['headline'] = batch[j].get('headline','') or batch[j].get('parent_headline','')
-            # Preserve original publication from parser
-            if not m.get('publication') or not m['publication'].strip():
-                m['publication'] = batch[j].get('publication','')
+            orig = batch[j]
+            # Start with AI tags, then override with authoritative parser fields
+            m = {**orig, **td}
+            # ALWAYS preserve parser's authoritative fields — these come from the docx directly
+            m['monitor_date'] = orig.get('monitor_date', '')
+            m['section'] = orig.get('section', '')
+            m['is_translated'] = orig.get('is_translated', False)
+            m['is_expansion'] = orig.get('is_expansion', False)
+            # URL: Parser's URL is authoritative (extracted from docx hyperlink)
+            # Only use AI's URL if parser had none
+            orig_url = orig.get('url', '')
+            if orig_url:
+                m['url'] = orig_url
+            # Headline: Prefer parser's headline, fall back to AI's
+            orig_hl = orig.get('headline', '') or orig.get('parent_headline', '')
+            if orig_hl and orig_hl.strip():
+                m['headline'] = orig_hl
+            # Publication: Prefer parser's publication
+            orig_pub = orig.get('publication', '')
+            if orig_pub and orig_pub.strip():
+                m['publication'] = orig_pub
             tagged.append(m)
     for j in range(len(parsed), len(batch)): batch[j]['tags_failed'] = True; tagged.append(batch[j])
 
