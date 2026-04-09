@@ -491,19 +491,74 @@ def tag_articles_batch(articles, api_key, analyst_examples="", progress_callback
                 fail += 1
                 if progress_callback: progress_callback(pct, f"Batch error — {completed}/{total_batches}")
     if progress_callback: progress_callback(1.0, f"Done! {ok}/{total_batches} batches OK.")
+    # Post-processing: fix common AI output issues
+    tagged = post_process_tagged(tagged)
     return tagged
+
+
+def post_process_tagged(tagged):
+    """Fix common issues in AI-tagged output."""
+    from datetime import datetime
+    today_str = datetime.now().strftime('%b. %-d')  # e.g., "Apr. 9"
+    today_alt = datetime.now().strftime('%B %-d')  # e.g., "April 9"
+
+    seen_keys = set()
+    deduped = []
+    for art in tagged:
+        # Fix None/missing sentiment — default to Neutral
+        brands = art.get('brands', {})
+        for bname, bdata in brands.items():
+            if isinstance(bdata, dict):
+                sent = bdata.get('sentiment', '')
+                if not sent or sent == 'None' or sent not in ('Positive', 'Negative', 'Neutral'):
+                    bdata['sentiment'] = 'Neutral'
+
+        # Fix date_published — if it's today's date or empty, use monitor_date
+        dp = art.get('date_published', '')
+        if not dp or dp == 'None' or dp == today_str or dp == today_alt:
+            md = art.get('monitor_date', '')
+            if md:
+                art['date_published'] = md
+            # else leave as-is
+
+        # Normalize publication name
+        pub = art.get('publication', '')
+        if pub:
+            art['publication'] = normalize_publication_name(pub)
+
+        # Fix article_or_pr — ensure it's never empty
+        if not art.get('article_or_pr') or art['article_or_pr'] == 'None':
+            art['article_or_pr'] = 'Article'
+
+        # Deduplicate exact duplicate entries (same headline + pub + url)
+        # NOTE: The same article CAN and SHOULD appear in multiple brand tabs.
+        # We only remove cases where the AI/parser returned the exact same article
+        # object multiple times in the results (e.g., batch overlap or AI duplication).
+        hl = (art.get('headline', '') or '').strip().lower()
+        pub_key = (art.get('publication', '') or '').strip().lower()
+        url_key = (art.get('url', '') or '').strip().lower()
+        dedup_key = f"{pub_key}|||{hl}|||{url_key}"
+        if dedup_key in seen_keys and hl:
+            continue  # Skip exact duplicate entry
+        if hl:
+            seen_keys.add(dedup_key)
+
+        deduped.append(art)
+
+    return deduped
 
 def build_articles_text(batch, summary_only=False):
     text = ""
     for j, art in enumerate(batch):
-        text += f"\n--- ARTICLE {j+1} ---\nPublication: {art['publication']}\nHeadline: {art['headline']}\nURL: {art.get('url','NONE')}\nSection: {art['section']}\n"
+        md = art.get('monitor_date', '')
+        text += f"\n--- ARTICLE {j+1} ---\nPublication: {art['publication']}\nHeadline: {art['headline']}\nURL: {art.get('url','NONE')}\nSection: {art['section']}\nMonitor Date: {md}\n"
         url = art.get('url',''); blocked = is_paywall_url(url)
         if summary_only or art.get('is_paywall') or not url or blocked:
             s = art.get('summary','') or art.get('parent_summary','')
             text += f"{'PAYWALLED - ' if blocked else ''}Tag from summary:\n{s[:800]}\n"
             art['is_paywall'] = True
         else:
-            text += f"HAS URL - Read full article via web search.\n"
+            text += f"HAS URL - Read full article via web search. Extract the actual article publication date.\n"
             if art.get('summary'): text += f"Backup summary: {art['summary'][:500]}\n"
     return text
 
@@ -519,16 +574,18 @@ Respond ONLY with JSON array. No markdown. Each item:
 "confidence":{{"sentiment":"high/medium/low","topics":"high/medium/low","overall":"high/medium/low"}},
 "ceo_mention":"","is_paywall":true/false,"publication_flagged":true/false}}
 
-REMINDERS:
-- Publication names in PROPER title case (not ALL CAPS).
-- publication_flagged=true if pub name is unfamiliar or unusual.
-- article_or_pr: Default "Article". Only "Press Release" for actual PR wire releases.
-- Sentiment: Favorable stock coverage = Positive. Unfavorable = Negative. Purely factual = Neutral.
-- Topics: Tag ONLY when a tracked brand is taking CONCRETE ACTION (not planning/aspiring).
-- ALL stock/financial coverage → Financial Performance = true.
-- CEO: ONLY flag CEOs of the 6 tracked brands. Leave "" for other companies' CEOs.
-- date_published: "Mon. DD" format (e.g., "Apr. 7").
-- No topic match → "No Category Match": true.
+CRITICAL REMINDERS:
+- date_published: Extract the ACTUAL article publication date from the article content. Format: "Mon. DD" (e.g., "Mar. 15", "Feb. 8"). If the article says "March 15, 2026" → "Mar. 15". If the article says "15 March 2026" → "Mar. 15". NEVER use today's date as a default. If you truly cannot determine the date, use the monitor date from the section header.
+- Publication names in PROPER title case (not ALL CAPS). Convert ALL CAPS to proper case.
+- publication_flagged=true if pub name is unfamiliar or you're unsure of correct format.
+- article_or_pr: Default "Article". Only "Press Release" for content from PR wire services (PR Newswire, Business Wire, GlobeNewsWire, ACCESS Newswire, EIN Presswire, OpenPR) or official company newsroom posts with PR formatting.
+- Sentiment MUST always be one of: "Positive", "Negative", or "Neutral". Never null/empty/None.
+- Sentiment is BRAND-SPECIFIC. A stock article with favorable outlook = Positive for that brand. "Faces Pressure" = Negative.
+- Topics: Tag ONLY when a tracked brand is taking CONCRETE ACTION (not planning/aspiring). A stock decline article about Carrier should be tagged "Financial Performance" ONLY, not Digitization/Electrification unless the article specifically discusses those topics.
+- ALL stock/financial/investment coverage → Financial Performance = true. If stock article ALSO discusses specific topics (sustainability initiatives, new products), tag those too. But don't add topics just because the company works in that space.
+- CEO: ONLY flag CEOs of the 6 tracked brands (Trane Technologies, Carrier, Honeywell, JCI, Daikin, Lennox). AHRI, industry association, or other company CEOs = leave empty "".
+- No topic match → "No Category Match": true (and all other topics false).
+- Each article should appear ONCE in the JSON array. Do not duplicate articles.
 CONFIDENCE: high=clear evidence, medium=inferred, low=guessing."""
 
 def build_system_prompt(examples=""):
@@ -537,15 +594,23 @@ Tag HVAC/climate articles with structured metadata + confidence scores.
 
 === BRANDS ===
 The 6 tracked brands: Trane Technologies (includes METUS, Mitsubishi Electric Trane, Thermo King), Carrier, Honeywell, JCI (Johnson Controls), Daikin, Lennox.
+Set "mentioned": true ONLY for brands that are actually named or discussed in the article. If an article is purely about Carrier's stock, ONLY Carrier.mentioned=true. Do NOT set mentioned=true for brands that are not in the article.
 
-=== SENTIMENT RULES (Fix #8) ===
+=== SENTIMENT RULES ===
 Sentiment MUST be brand-specific and reflect how the coverage portrays that brand:
-- Positive: Coverage portrays the brand favorably — awards, growth, innovation, positive stock outlook, product wins, executive praise. Example: "Trane Technologies: Why It Shines for Smart Investors" = POSITIVE for Trane.
-- Negative: Coverage portrays the brand unfavorably — lawsuits, recalls, poor earnings, layoffs, scandals, downgrades.
-- Neutral: Brand is mentioned factually without positive or negative framing.
-CRITICAL: Stock coverage with favorable language (e.g. "shines", "top pick", "outperforms", "strong buy", "smart investors") is POSITIVE, NOT Neutral. Only code Neutral for purely factual stock mentions with no directional language.
+- Positive: Coverage portrays the brand favorably — awards, growth, innovation, positive stock outlook, product wins, executive praise.
+- Negative: Coverage portrays the brand unfavorably — lawsuits, recalls, poor earnings, layoffs, scandals, downgrades, stock pressure.
+- Neutral: Brand is mentioned factually without positive or negative framing, or brand is mentioned only in passing.
 
-=== TOPIC DEFINITIONS & ACTIONABLE CODING RULE (Fix #5, #9, #10) ===
+IMPORTANT NUANCES (learned from analyst patterns):
+- "Faces Pressure" / "Headwinds" / "Slowdown" in a stock headline = NEGATIVE for that brand, not Neutral
+- "Why It Shines" / "Smart Investors" / "Monster Win" / "Can't Stop Buying" = depends on article content:
+  * If article discusses sustainability/innovation/growth alongside stock → POSITIVE
+  * If article is purely a stock clickbait aggregator with no substance → NEUTRAL
+- Stock articles about Nvidia/Jensen Huang impacting HVAC cooling stocks = NEUTRAL (external market force, not brand-specific)
+- Sentiment MUST always be "Positive", "Negative", or "Neutral". NEVER null or empty.
+
+=== TOPIC DEFINITIONS & ACTIONABLE CODING RULE ===
 Topics MUST be tagged in the context of the tracked brands mentioned in the article. The brand must be DOING something related to the topic, not just adjacent to it.
 
 CRITICAL ACTIONABLE RULE: Only tag a topic if the article describes CONCRETE ACTIONS TAKEN or CURRENTLY UNDERWAY — not plans, intentions, goals, or aspirations.
@@ -566,28 +631,35 @@ This actionable rule applies to ALL topics below:
 8. Financial Performance — Revenue, earnings, stock: Coverage discusses a tracked brand's financial results, stock performance, market cap, analyst ratings, earnings, revenue, acquisitions, deals. ALL stock-related coverage must be tagged Financial Performance.
 9. No Category Match — Use ONLY when none of the above 8 topics apply. Broader HVAC industry news that doesn't fit specific categories.
 
-=== CEO / EXECUTIVE MENTION (Fix #4) ===
+CRITICAL TOPIC RULES:
+- A stock/financial article should ONLY get Financial Performance unless the article ALSO substantively discusses specific topics (sustainability programs, new products, etc.)
+- Do NOT tag Digitization/Electrification/Innovation just because a company operates in that space. The ARTICLE must discuss those topics specifically.
+- "No Category Match" is used liberally — tangential articles, industry mentions, electromobility in general, unrelated awards, etc.
+- An article can have MULTIPLE topics (e.g., Sustainability + Decarbonization + Energy Efficiency + Financial Performance) if it genuinely covers all of them.
+
+=== CEO / EXECUTIVE MENTION ===
 ONLY flag CEO mentions for the 6 tracked brands' CEOs/executives:
-- Trane Technologies CEO, Carrier CEO, Honeywell CEO, JCI CEO, Daikin CEO, Lennox CEO
+- Trane Technologies CEO (Dave Regnery), Carrier CEO, Honeywell CEO, JCI CEO, Daikin CEO, Lennox CEO
 - Use "CEO mention" if the CEO is named/referenced
 - Use "CEO quote" if the CEO is directly quoted
 - Use "CEO interview" if the article is an interview with the CEO
-- Leave EMPTY ("") if no tracked brand CEO is mentioned. Do NOT flag random companies' CEOs.
+- Leave EMPTY ("") if no tracked brand CEO is mentioned. Do NOT flag AHRI, industry association, supplier, or other company CEOs.
 
-=== PUBLICATION NAMES (Fix #6) ===
+=== PUBLICATION NAMES ===
 Use proper mixed-case publication names as they appear on the publication's own website. NOT all-caps.
-Examples: "The Wall Street Journal" not "THE WALL STREET JOURNAL", "Bloomberg" not "BLOOMBERG", "Reuters" not "REUTERS", "CNBC" not "cnbc", "Forbes" not "FORBES".
-If unsure of the exact format, use standard title case.
 If the publication name from the parsed document is ALL CAPS, convert it to proper title case.
 Flag: set "publication_flagged": true if you encounter a publication you haven't seen before or if the name seems unusual.
 
-=== ARTICLE vs PRESS RELEASE (Fix #7) ===
-IMPORTANT: Almost all coverage in media monitors is ARTICLES written by journalists, NOT press releases.
-Only classify as "Press Release" if the content is clearly an official company-issued press release (typically from PR Newswire, Business Wire, GlobeNewsWire, or the company's own newsroom with PR formatting).
-If in doubt, classify as "Article". Journalist-written news coverage about a company, even if based on a press release, is an "Article".
+=== ARTICLE vs PRESS RELEASE ===
+Default is "Article". Only classify as "Press Release" if:
+- Content is from a PR wire service: PR Newswire, Business Wire, GlobeNewsWire, ACCESS Newswire, EIN Presswire, OpenPR
+- Content is from a company's own newsroom with PR formatting
+- Content reads as an official company announcement, not a journalist's reporting
+If in doubt, classify as "Article".
 
 === DATE FORMAT ===
 date_published should be in format: "Mon. DD" (e.g., "Apr. 7", "Mar. 15"). Use 3-letter month abbreviation with period, space, then day number without leading zero.
+CRITICAL: Extract the ACTUAL publication date from the article. NEVER default to today's date.
 
 ALWAYS respond with ONLY valid JSON array."""
     if examples: base += f"\nANALYST EXAMPLES:\n{examples}"
@@ -738,17 +810,33 @@ def generate_excel(tagged_articles, monitor_date):
     out=BytesIO();wb.save(out);out.seek(0);return out
 
 def get_brand_articles(tagged, brand):
+    """Get articles for a specific brand tab. Primary: AI's brand.mentioned flag.
+    Fallback: section-based assignment for articles where AI didn't set mentioned flags."""
     result=[];bl=brand.lower()
-    aliases={'trane technologies':['trane','metus','mitsubishi electric trane','thermo king'],'carrier':['carrier global','carrier'],'honeywell':['honeywell'],'jci':['johnson controls','jci'],'daikin':['daikin'],'lennox':['lennox']}
+    aliases={'trane technologies':['trane','metus','mitsubishi electric trane','thermo king'],
+             'carrier':['carrier global','carrier'],'honeywell':['honeywell'],
+             'jci':['johnson controls','jci'],'daikin':['daikin'],'lennox':['lennox']}
     ba=aliases.get(bl,[bl])
     for art in tagged:
         bi=art.get('brands',{}).get(brand,{})
-        if bi.get('mentioned',False):result.append(art);continue
-        sec=art.get('section','').lower();txt=(art.get('headline','')+' '+art.get('summary','')).lower()
-        if bl=='trane technologies' and 'trane' in sec:result.append(art);continue
-        if 'benchmark' in sec or 'trends' in sec:
-            for a in ba:
-                if a in txt:result.append(art);break
+        # Primary: AI explicitly said this brand is mentioned
+        if bi.get('mentioned',False):
+            result.append(art)
+            continue
+        # Fallback: Section-based assignment ONLY if no brand has mentioned=True
+        # (means the AI didn't set any brand flags, so fall back to document section)
+        any_brand_mentioned = any(
+            art.get('brands',{}).get(b,{}).get('mentioned',False)
+            for b in ['Trane Technologies','Carrier','Honeywell','JCI','Daikin','Lennox']
+        )
+        if not any_brand_mentioned:
+            sec=art.get('section','').lower()
+            txt=(art.get('headline','')+' '+art.get('summary','')).lower()
+            if bl=='trane technologies' and 'trane' in sec:
+                result.append(art); continue
+            if 'benchmark' in sec or 'trends' in sec:
+                for a in ba:
+                    if a in txt:result.append(art);break
     return result
 
 def generate_csv(tagged, topics):
