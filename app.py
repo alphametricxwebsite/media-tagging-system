@@ -351,16 +351,54 @@ def parse_docx(file_bytes, filename=""):
             if not cells: continue
             paragraphs = cells[0].findall('.//w:p', ns)
             para_data = []
-            for p in paragraphs:
+            # Track field code state ACROSS paragraphs (fldChar begin/end can span P1→P2)
+            in_field = False
+            field_url = ''
+            field_text_parts = []
+            field_start_para = -1
+            for pi, p in enumerate(paragraphs):
                 parts, hl_list = [], []
-                for r in p.findall('./w:r', ns):
-                    for t in r.findall('.//w:t', ns):
-                        if t.text: parts.append(t.text)
+                # Method 1: Standard w:hyperlink elements
                 for hl in p.findall('./w:hyperlink', ns):
                     rid = hl.attrib.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id', '')
                     hl_t = ''.join(t.text for r in hl.findall('.//w:r', ns) for t in r.findall('.//w:t', ns) if t.text).strip()
                     url = hyperlinks.get(rid, '')
                     if hl_t or url: hl_list.append({'text': hl_t, 'url': url}); parts.append(hl_t)
+                # Method 2: Field code hyperlinks (fldChar + instrText)
+                runs = p.findall('./w:r', ns)
+                for r in runs:
+                    fld = r.find('.//w:fldChar', ns)
+                    instr = r.find('.//w:instrText', ns)
+                    if fld is not None:
+                        fld_type = ''
+                        for attr_key in fld.attrib:
+                            if 'fldCharType' in attr_key:
+                                fld_type = fld.attrib[attr_key]
+                        if fld_type == 'begin':
+                            in_field = True; field_url = ''; field_text_parts = []; field_start_para = pi
+                        elif fld_type == 'separate':
+                            pass
+                        elif fld_type == 'end':
+                            if field_url:
+                                ft = ''.join(field_text_parts).strip()
+                                if ft or field_url:
+                                    if field_start_para == pi:
+                                        hl_list.append({'text': ft, 'url': field_url})
+                                        parts.append(ft)
+                                    elif field_start_para >= 0 and field_start_para < len(para_data):
+                                        para_data[field_start_para]['hyperlinks'].append({'text': ft, 'url': field_url})
+                                        para_data[field_start_para]['text'] = (para_data[field_start_para]['text'] + ' ' + ft).strip()
+                            in_field = False; field_url = ''; field_text_parts = []; field_start_para = -1
+                    elif instr is not None and instr.text:
+                        m = re.search(r'HYPERLINK\s+"([^"]+)"', instr.text)
+                        if m: field_url = m.group(1)
+                    elif in_field and field_url:
+                        for t in r.findall('.//w:t', ns):
+                            if t.text: field_text_parts.append(t.text)
+                    else:
+                        if not in_field:
+                            for t in r.findall('.//w:t', ns):
+                                if t.text: parts.append(t.text)
                 para_data.append({'text': ''.join(parts).strip(), 'hyperlinks': hl_list})
             full = ' '.join(p['text'] for p in para_data).strip()
             fl = full.lower()
@@ -448,7 +486,10 @@ def safe_extract_text(response):
 
 def _process_single_batch(client, batch, batch_num, total_batches, analyst_examples):
     sp = build_system_prompt(analyst_examples)
-    needs_web = any(a.get('url') and not a.get('is_paywall') and not is_paywall_url(a.get('url','')) for a in batch)
+    # Enable web_search for: articles with URLs to read, AND articles without URLs that need searching
+    has_url_articles = any(a.get('url') and not is_paywall_url(a.get('url','')) for a in batch)
+    has_no_url_articles = any(not a.get('url') and not a.get('is_paywall') for a in batch)
+    needs_web = has_url_articles or has_no_url_articles
     result = {'batch_num': batch_num, 'tagged': [], 'ok': False}
     try:
         atxt = build_articles_text(batch, summary_only=False)
@@ -553,11 +594,19 @@ def build_articles_text(batch, summary_only=False):
         md = art.get('monitor_date', '')
         text += f"\n--- ARTICLE {j+1} ---\nPublication: {art['publication']}\nHeadline: {art['headline']}\nURL: {art.get('url','NONE')}\nSection: {art['section']}\nMonitor Date: {md}\n"
         url = art.get('url',''); blocked = is_paywall_url(url)
-        if summary_only or art.get('is_paywall') or not url or blocked:
+        if summary_only or blocked:
+            # Truly paywalled — use summary only
             s = art.get('summary','') or art.get('parent_summary','')
-            text += f"{'PAYWALLED - ' if blocked else ''}Tag from summary:\n{s[:800]}\n"
+            text += f"PAYWALLED - Tag from summary only:\n{s[:800]}\n"
             art['is_paywall'] = True
+        elif not url:
+            # No URL in docx but NOT paywalled — search for it by headline
+            s = art.get('summary','') or art.get('parent_summary','')
+            text += f"NO URL IN DOCUMENT - Search for this article by headline to find the actual URL and publication date. Use web_search with the headline.\n"
+            text += f"Summary for context: {s[:600]}\n"
+            text += f"IMPORTANT: Return the actual article URL in the 'url' field so we can hyperlink the headline.\n"
         else:
+            # Has URL — read the full article
             text += f"HAS URL - Read full article via web search. Extract the actual article publication date.\n"
             if art.get('summary'): text += f"Backup summary: {art['summary'][:500]}\n"
     return text
