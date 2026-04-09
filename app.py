@@ -669,26 +669,31 @@ def merge_results(tagged, batch, parsed):
     for j, td in enumerate(parsed):
         if j < len(batch):
             orig = batch[j]
-            # Start with AI tags, then override with authoritative parser fields
+            # Start with parser data, overlay AI tags
             m = {**orig, **td}
-            # ALWAYS preserve parser's authoritative fields — these come from the docx directly
+            # ALWAYS preserve parser's authoritative metadata fields
             m['monitor_date'] = orig.get('monitor_date', '')
             m['section'] = orig.get('section', '')
             m['is_translated'] = orig.get('is_translated', False)
             m['is_expansion'] = orig.get('is_expansion', False)
-            # URL: Parser's URL is authoritative (extracted from docx hyperlink)
-            # Only use AI's URL if parser had none
-            orig_url = orig.get('url', '')
+            # URL: Use parser's URL if it exists (extracted from docx hyperlink).
+            # If parser had NO URL, use the AI's URL (found via web_search).
+            orig_url = (orig.get('url', '') or '').strip()
+            ai_url = (td.get('url', '') or '').strip()
             if orig_url:
                 m['url'] = orig_url
-            # Headline: Prefer parser's headline, fall back to AI's
-            orig_hl = orig.get('headline', '') or orig.get('parent_headline', '')
-            if orig_hl and orig_hl.strip():
-                m['headline'] = orig_hl
-            # Publication: Prefer parser's publication
-            orig_pub = orig.get('publication', '')
-            if orig_pub and orig_pub.strip():
-                m['publication'] = orig_pub
+            elif ai_url and ai_url.lower() not in ('none', 'null', ''):
+                m['url'] = ai_url
+            else:
+                m['url'] = ''
+            # Headline: Prefer parser's headline (from docx), fall back to AI's
+            orig_hl = (orig.get('headline', '') or orig.get('parent_headline', '') or '').strip()
+            ai_hl = (td.get('headline', '') or '').strip()
+            m['headline'] = orig_hl if orig_hl else ai_hl
+            # Publication: Prefer parser's publication, fall back to AI's
+            orig_pub = (orig.get('publication', '') or '').strip()
+            ai_pub = (td.get('publication', '') or '').strip()
+            m['publication'] = orig_pub if orig_pub else ai_pub
             tagged.append(m)
     for j in range(len(parsed), len(batch)): batch[j]['tags_failed'] = True; tagged.append(batch[j])
 
