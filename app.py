@@ -282,6 +282,50 @@ def is_paywall_url(url):
 
 
 # ============================================================
+# PUBLICATION NAME NORMALIZATION (Fix #6)
+# ============================================================
+KNOWN_PUBLICATIONS = {
+    'bloomberg': 'Bloomberg', 'reuters': 'Reuters', 'cnbc': 'CNBC',
+    'the wall street journal': 'The Wall Street Journal', 'wsj': 'The Wall Street Journal',
+    'the new york times': 'The New York Times', 'nyt': 'The New York Times',
+    'the washington post': 'The Washington Post', 'forbes': 'Forbes',
+    'fortune': 'Fortune', 'business insider': 'Business Insider',
+    'the economist': 'The Economist', 'financial times': 'Financial Times',
+    'associated press': 'Associated Press', 'ap news': 'AP News',
+    'yahoo finance': 'Yahoo Finance', 'yahoo! finance': 'Yahoo Finance',
+    'seeking alpha': 'Seeking Alpha', 'marketwatch': 'MarketWatch',
+    'barron\'s': "Barron's", 'barrons': "Barron's",
+    'morningstar': 'Morningstar', 'investopedia': 'Investopedia',
+    'the motley fool': 'The Motley Fool', 'motley fool': 'The Motley Fool',
+    'pr newswire': 'PR Newswire', 'business wire': 'Business Wire',
+    'globe newswire': 'GlobeNewsWire', 'globenewswire': 'GlobeNewsWire',
+    'achr news': 'ACHR News', 'achrnews': 'ACHR News',
+    'contracting business': 'Contracting Business',
+    'hpac engineering': 'HPAC Engineering', 'hpac': 'HPAC Engineering',
+    'the air conditioning, heating & refrigeration news': 'ACHR News',
+    'hvac insider': 'HVAC Insider', 'supply house times': 'Supply House Times',
+    'cooling post': 'Cooling Post', 'the cooling post': 'Cooling Post',
+    'zacks investment research': 'Zacks Investment Research', 'zacks': 'Zacks Investment Research',
+    'stock story': 'StockStory', 'stockstory': 'StockStory',
+    'ainvest': 'AInvest', 'simply wall st': 'Simply Wall St',
+    'handelsblatt': 'Handelsblatt', 'afp': 'AFP',
+}
+
+def normalize_publication_name(pub):
+    """Convert ALL CAPS pub names to proper case, using known mappings where possible."""
+    if not pub: return pub
+    pub_stripped = pub.strip()
+    # Check known mappings (case-insensitive)
+    lookup = pub_stripped.lower()
+    if lookup in KNOWN_PUBLICATIONS:
+        return KNOWN_PUBLICATIONS[lookup]
+    # If it's ALL CAPS, convert to title case
+    if pub_stripped == pub_stripped.upper() and len(pub_stripped) > 3:
+        return pub_stripped.title()
+    return pub_stripped
+
+
+# ============================================================
 # DOCX PARSER (unchanged logic)
 # ============================================================
 def parse_docx(file_bytes, filename=""):
@@ -335,12 +379,18 @@ def parse_docx(file_bytes, filename=""):
     return articles, monitor_date
 
 def extract_monitor_date(fn):
-    for pat in [r'(\d{2})[._](\d{2})[._](\d{2})', r'(\d{2})-(\d{2})-(\d{2})']:
+    """Extract monitor date from filename. Tries MM.DD.YY, MM.DD.YYYY, MM-DD-YY, etc."""
+    names = {'01':'Jan.','02':'Feb.','03':'Mar.','04':'Apr.','05':'May','06':'Jun.',
+             '07':'Jul.','08':'Aug.','09':'Sep.','10':'Oct.','11':'Nov.','12':'Dec.'}
+    # Try MM.DD.YYYY or MM.DD.YY patterns
+    for pat in [r'(\d{1,2})[._-](\d{1,2})[._-](\d{4})', r'(\d{1,2})[._-](\d{1,2})[._-](\d{2})']:
         m = re.search(pat, fn)
         if m:
-            names = {'01':'Jan.','02':'Feb.','03':'Mar.','04':'Apr.','05':'May','06':'Jun.',
-                     '07':'Jul.','08':'Aug.','09':'Sep.','10':'Oct.','11':'Nov.','12':'Dec.'}
-            return f"{names.get(m.group(1), m.group(1))} {int(m.group(2))}"
+            g1, g2, g3 = m.group(1).zfill(2), m.group(2).zfill(2), m.group(3)
+            # g1=month, g2=day, g3=year
+            month_str = names.get(g1, g1)
+            day = int(g2)
+            return f"{month_str} {day}"
     return ""
 
 def parse_article_cell(para_data, section, monitor_date):
@@ -365,9 +415,14 @@ def parse_article_cell(para_data, section, monitor_date):
             elif text.lower() == 'summary:': continue
             elif not summary and not text.lower().startswith('this story'): summary += (" "+text) if summary else text
     if not pub and not hl: return None
+    # Fix #2: For paywall articles (no URL), still keep the headline text from the docx
+    # Fix #3: is_paywall is determined by blocklist later, not by absence of URL
+    # Some articles legitimately have no hyperlink in the docx but have a headline
+    # Fix #6: Normalize publication name from ALL CAPS
+    pub = normalize_publication_name(pub)
     return {'publication': pub, 'headline': hl, 'url': hl_url, 'summary': summary[:1500],
             'section': section, 'monitor_date': monitor_date, 'is_translated': is_trans,
-            'is_paywall': not hl_url, 'is_expansion': False}
+            'is_paywall': False, 'is_expansion': False}
 
 def parse_expansion_pubs(para_data):
     exps = []
@@ -458,22 +513,82 @@ def build_user_prompt(count, atxt):
 {atxt}
 
 Respond ONLY with JSON array. No markdown. Each item:
-{{"publication":"...","headline":"...","url":"...","date_published":"Mon. DD","article_or_pr":"Article/Press Release",
+{{"publication":"Proper Title Case Name","headline":"...","url":"...","date_published":"Mon. DD","article_or_pr":"Article",
 "brands":{{"Trane Technologies":{{"sentiment":"Positive/Negative/Neutral","mentioned":true/false}},"Carrier":{{"sentiment":"...","mentioned":true/false}},"Honeywell":{{"sentiment":"...","mentioned":true/false}},"JCI":{{"sentiment":"...","mentioned":true/false}},"Daikin":{{"sentiment":"...","mentioned":true/false}},"Lennox":{{"sentiment":"...","mentioned":true/false}}}},
 "topics":{{"Sustainability":true/false,"Decarbonization":true/false,"Innovation":true/false,"Energy Efficiency":true/false,"Digitization":true/false,"Electrification":true/false,"Workforce Development":true/false,"Financial Performance":true/false,"No Category Match":true/false}},
 "confidence":{{"sentiment":"high/medium/low","topics":"high/medium/low","overall":"high/medium/low"}},
-"ceo_mention":""/CEO mention/CEO quote/CEO interview","is_paywall":true/false}}
+"ceo_mention":"","is_paywall":true/false,"publication_flagged":true/false}}
 
-RULES: Semantic tagging. Brand-specific sentiment. METUS/Thermo King=Trane. No topic→No Category Match.
+REMINDERS:
+- Publication names in PROPER title case (not ALL CAPS).
+- publication_flagged=true if pub name is unfamiliar or unusual.
+- article_or_pr: Default "Article". Only "Press Release" for actual PR wire releases.
+- Sentiment: Favorable stock coverage = Positive. Unfavorable = Negative. Purely factual = Neutral.
+- Topics: Tag ONLY when a tracked brand is taking CONCRETE ACTION (not planning/aspiring).
+- ALL stock/financial coverage → Financial Performance = true.
+- CEO: ONLY flag CEOs of the 6 tracked brands. Leave "" for other companies' CEOs.
+- date_published: "Mon. DD" format (e.g., "Apr. 7").
+- No topic match → "No Category Match": true.
 CONFIDENCE: high=clear evidence, medium=inferred, low=guessing."""
 
 def build_system_prompt(examples=""):
     base = """You are a Media Intelligence Tagging Agent for Trane Technologies.
 Tag HVAC/climate articles with structured metadata + confidence scores.
-TOPICS (semantic): Sustainability, Decarbonization, Innovation, Energy Efficiency, Digitization, Electrification, Workforce Development, Financial Performance, No Category Match.
-SENTIMENT: Brand-specific. BRANDS: Trane Technologies (incl METUS, Thermo King), Carrier, Honeywell, JCI, Daikin, Lennox.
-CONFIDENCE: high=clear evidence, medium=reasonable inference, low=limited info.
-CEO: "CEO mention"/"CEO quote"/"CEO interview"
+
+=== BRANDS ===
+The 6 tracked brands: Trane Technologies (includes METUS, Mitsubishi Electric Trane, Thermo King), Carrier, Honeywell, JCI (Johnson Controls), Daikin, Lennox.
+
+=== SENTIMENT RULES (Fix #8) ===
+Sentiment MUST be brand-specific and reflect how the coverage portrays that brand:
+- Positive: Coverage portrays the brand favorably — awards, growth, innovation, positive stock outlook, product wins, executive praise. Example: "Trane Technologies: Why It Shines for Smart Investors" = POSITIVE for Trane.
+- Negative: Coverage portrays the brand unfavorably — lawsuits, recalls, poor earnings, layoffs, scandals, downgrades.
+- Neutral: Brand is mentioned factually without positive or negative framing.
+CRITICAL: Stock coverage with favorable language (e.g. "shines", "top pick", "outperforms", "strong buy", "smart investors") is POSITIVE, NOT Neutral. Only code Neutral for purely factual stock mentions with no directional language.
+
+=== TOPIC DEFINITIONS & ACTIONABLE CODING RULE (Fix #5, #9, #10) ===
+Topics MUST be tagged in the context of the tracked brands mentioned in the article. The brand must be DOING something related to the topic, not just adjacent to it.
+
+CRITICAL ACTIONABLE RULE: Only tag a topic if the article describes CONCRETE ACTIONS TAKEN or CURRENTLY UNDERWAY — not plans, intentions, goals, or aspirations.
+- "Company X plans to reduce emissions" = NOT Sustainability (just planning)
+- "Company X reduced emissions by 30% this year" = Sustainability (action taken)
+- "Company X is investing in heat pump manufacturing" = Electrification (action underway)
+- "Company X aims to electrify its product line" = NOT Electrification (just an aim)
+
+This actionable rule applies to ALL topics below:
+
+1. Sustainability — Climate change ACTION: A tracked brand is actively implementing sustainability initiatives, has achieved sustainability milestones, or is executing climate programs. NOT just stating goals.
+2. Decarbonization — Reducing carbon emissions: A tracked brand is actively reducing carbon footprint, implementing low-carbon tech, has achieved emission reductions. NOT just pledging to decarbonize.
+3. Innovation — Advancing HVAC tech: A tracked brand is launching new products, deploying new technology, has patents or R&D breakthroughs. NOT just talking about future innovation.
+4. Energy Efficiency — Optimized energy use: A tracked brand is delivering measurably more efficient products/systems, implementing efficiency upgrades. NOT just promising efficiency.
+5. Digitization — Digital tech, AI, IoT: A tracked brand is deploying digital solutions, AI, smart building tech, connected systems. NOT just exploring digital options.
+6. Electrification — Electrification of heat: A tracked brand is manufacturing/deploying heat pumps, electric HVAC, converting from gas to electric. NOT just considering electrification.
+7. Workforce Development — Training, upskilling: A tracked brand is running training programs, hiring initiatives, apprenticeships, DEI programs. NOT just announcing workforce plans.
+8. Financial Performance — Revenue, earnings, stock: Coverage discusses a tracked brand's financial results, stock performance, market cap, analyst ratings, earnings, revenue, acquisitions, deals. ALL stock-related coverage must be tagged Financial Performance.
+9. No Category Match — Use ONLY when none of the above 8 topics apply. Broader HVAC industry news that doesn't fit specific categories.
+
+=== CEO / EXECUTIVE MENTION (Fix #4) ===
+ONLY flag CEO mentions for the 6 tracked brands' CEOs/executives:
+- Trane Technologies CEO, Carrier CEO, Honeywell CEO, JCI CEO, Daikin CEO, Lennox CEO
+- Use "CEO mention" if the CEO is named/referenced
+- Use "CEO quote" if the CEO is directly quoted
+- Use "CEO interview" if the article is an interview with the CEO
+- Leave EMPTY ("") if no tracked brand CEO is mentioned. Do NOT flag random companies' CEOs.
+
+=== PUBLICATION NAMES (Fix #6) ===
+Use proper mixed-case publication names as they appear on the publication's own website. NOT all-caps.
+Examples: "The Wall Street Journal" not "THE WALL STREET JOURNAL", "Bloomberg" not "BLOOMBERG", "Reuters" not "REUTERS", "CNBC" not "cnbc", "Forbes" not "FORBES".
+If unsure of the exact format, use standard title case.
+If the publication name from the parsed document is ALL CAPS, convert it to proper title case.
+Flag: set "publication_flagged": true if you encounter a publication you haven't seen before or if the name seems unusual.
+
+=== ARTICLE vs PRESS RELEASE (Fix #7) ===
+IMPORTANT: Almost all coverage in media monitors is ARTICLES written by journalists, NOT press releases.
+Only classify as "Press Release" if the content is clearly an official company-issued press release (typically from PR Newswire, Business Wire, GlobeNewsWire, or the company's own newsroom with PR formatting).
+If in doubt, classify as "Article". Journalist-written news coverage about a company, even if based on a press release, is an "Article".
+
+=== DATE FORMAT ===
+date_published should be in format: "Mon. DD" (e.g., "Apr. 7", "Mar. 15"). Use 3-letter month abbreviation with period, space, then day number without leading zero.
+
 ALWAYS respond with ONLY valid JSON array."""
     if examples: base += f"\nANALYST EXAMPLES:\n{examples}"
     return base
@@ -482,7 +597,14 @@ def merge_results(tagged, batch, parsed):
     for j, td in enumerate(parsed):
         if j < len(batch):
             m = {**batch[j], **td}; m['monitor_date'] = batch[j].get('monitor_date','')
+            # Preserve original URL from parser if AI didn't return one
             if not m.get('url'): m['url'] = batch[j].get('url','')
+            # Preserve original headline from parser if AI returned empty
+            if not m.get('headline') or not m['headline'].strip():
+                m['headline'] = batch[j].get('headline','') or batch[j].get('parent_headline','')
+            # Preserve original publication from parser
+            if not m.get('publication') or not m['publication'].strip():
+                m['publication'] = batch[j].get('publication','')
             tagged.append(m)
     for j in range(len(parsed), len(batch)): batch[j]['tags_failed'] = True; tagged.append(batch[j])
 
@@ -568,6 +690,7 @@ def generate_excel(tagged_articles, monitor_date):
     hfl=PatternFill(start_color='1e1e2a',end_color='1e1e2a',fill_type='solid')
     df=Font(name='Calibri',size=10);lf=Font(name='Calibri',size=10,color='6366F1',underline='single')
     pf=PatternFill(start_color='FFF2CC',end_color='FFF2CC',fill_type='solid')
+    pub_flag_fill=PatternFill(start_color='FFFF00',end_color='FFFF00',fill_type='solid')  # Bright yellow for flagged publications
     bd=Border(left=Side(style='thin',color='D9D9D9'),right=Side(style='thin',color='D9D9D9'),top=Side(style='thin',color='D9D9D9'),bottom=Side(style='thin',color='D9D9D9'))
     wb.remove(wb.active)
     ws_tot=wb.create_sheet("Totals");ws_tot['B2']='Honeywell';ws_tot['C2']='Carrier';ws_tot['D2']='JCI';ws_tot['E2']='Daikin';ws_tot['F2']='Lennox';ws_tot['G2']='Trane'
@@ -580,10 +703,17 @@ def generate_excel(tagged_articles, monitor_date):
         ba=get_brand_articles(tagged_articles,brand)
         for ri,art in enumerate(ba,2):
             brd=art.get('brands',{}).get(brand,{});td=art.get('topics',{})
-            ws.cell(row=ri,column=1,value=art.get('monitor_date','')).font=df;ws.cell(row=ri,column=2,value=art.get('date_published','')).font=df;ws.cell(row=ri,column=3,value=art.get('publication','')).font=df
-            hc=ws.cell(row=ri,column=4,value=art.get('headline',''))
-            if art.get('url'):hc.hyperlink=art['url'];hc.font=lf
-            else:hc.font=df
+            ws.cell(row=ri,column=1,value=art.get('monitor_date','')).font=df;ws.cell(row=ri,column=2,value=art.get('date_published','')).font=df
+            pub_cell=ws.cell(row=ri,column=3,value=art.get('publication',''))
+            pub_cell.font=df
+            if art.get('publication_flagged'):
+                pub_cell.fill=pub_flag_fill  # Highlight flagged publications in yellow
+            hc=ws.cell(row=ri,column=4,value=art.get('headline','') or '(no headline)')
+            url = art.get('url','')
+            if url and art.get('headline','').strip():
+                hc.hyperlink=url;hc.font=lf
+            else:
+                hc.font=df
             ws.cell(row=ri,column=5,value=art.get('article_or_pr','Article')).font=df;ws.cell(row=ri,column=6,value=brd.get('sentiment','Neutral')).font=df
             for ti,topic in enumerate(topics):v='x' if td.get(topic,False) else '';ws.cell(row=ri,column=7+ti,value=v).font=df;ws.cell(row=ri,column=7+ti).alignment=Alignment(horizontal='center')
             ws.cell(row=ri,column=16,value='x').font=df;ws.cell(row=ri,column=16).alignment=Alignment(horizontal='center');ws.cell(row=ri,column=17,value=art.get('ceo_mention','')).font=df
@@ -594,7 +724,17 @@ def generate_excel(tagged_articles, monitor_date):
     cm={'Honeywell':'B','Carrier':'C','JCI':'D','Daikin':'E','Lennox':'F','Trane Technologies':'G'}
     for b in brands:ws_tot[f'{cm.get(b,"B")}3']=len(get_brand_articles(tagged_articles,b))
     ws_def=wb.create_sheet("Key Topics & Definitions");ws_def['A1']='Key Topics';ws_def['B1']='Definitions'
-    for di,(t,d) in enumerate([('Sustainability','Climate change action'),('Decarbonization','Reducing carbon emissions'),('Innovation','Advancing HVAC tech'),('Energy Efficiency','Optimized energy use'),('Digitization','Digital tech, AI'),('Electrification','Electrification of heat'),('Workforce Development','Training, upskilling'),('Financial Performance','Revenue, earnings, stock'),('No Category Match','Broader HVAC')],2):ws_def[f'A{di}']=t;ws_def[f'B{di}']=d
+    for di,(t,d) in enumerate([
+        ('Sustainability','Climate change action — brand actively implementing sustainability initiatives or achieving milestones'),
+        ('Decarbonization','Reducing carbon emissions — brand actively reducing carbon footprint or deploying low-carbon tech'),
+        ('Innovation','Advancing HVAC tech — brand launching new products, deploying new technology, R&D breakthroughs'),
+        ('Energy Efficiency','Optimized energy use — brand delivering measurably more efficient products/systems'),
+        ('Digitization','Digital tech, AI, IoT — brand deploying digital solutions, smart building tech, connected systems'),
+        ('Electrification','Electrification of heat — brand manufacturing/deploying heat pumps, electric HVAC, gas-to-electric conversion'),
+        ('Workforce Development','Training, upskilling — brand running training programs, hiring initiatives, apprenticeships'),
+        ('Financial Performance','Revenue, earnings, stock — all financial results, stock performance, analyst ratings, deals'),
+        ('No Category Match','Broader HVAC — none of the above 8 topics apply')
+    ],2):ws_def[f'A{di}']=t;ws_def[f'B{di}']=d
     out=BytesIO();wb.save(out);out.seek(0);return out
 
 def get_brand_articles(tagged, brand):
@@ -748,8 +888,10 @@ def main():
             if not articles:
                 st.error("No articles found."); return
             for art in articles:
-                if art.get('url') and is_paywall_url(art['url']) and not art.get('is_paywall'):
+                if art.get('url') and is_paywall_url(art['url']):
                     art['is_paywall'] = True; art['paywall_reason'] = 'blocklist'
+                elif not art.get('url'):
+                    art['is_paywall'] = True; art['paywall_reason'] = 'no_url'
             st.session_state.parsed_articles = articles
             st.session_state.monitor_date = md
             st.rerun()
@@ -913,6 +1055,7 @@ def tile_view(articles, topics, brand_filter):
         if art.get('is_expansion'):badges+='<span class="tag-chip tag-expansion">🔗 Expansion</span>'
         if art.get('ceo_mention'):badges+=f'<span class="tag-chip tag-ceo">{art["ceo_mention"]}</span>'
         if art.get('tags_failed'):badges+='<span class="tag-chip tag-low">⚠️ Fallback</span>'
+        if art.get('publication_flagged'):badges+='<span class="tag-chip tag-paywall">⚠️ Check Pub Name</span>'
 
         overall_conf = conf.get('overall','')
         if overall_conf == 'high': badges += '<span class="tag-chip tag-high">✓ High</span>'
