@@ -413,6 +413,9 @@ def parse_docx(file_bytes, filename=""):
                 for exp in parse_expansion_pubs(para_data):
                     exp.update({'section': current_section, 'monitor_date': monitor_date,
                                'parent_headline': article['headline'], 'parent_summary': article.get('summary','')})
+                    # Use parent headline for expansion articles that have no headline of their own
+                    if not exp.get('headline'):
+                        exp['headline'] = article['headline']
                     articles.append(exp)
     return articles, monitor_date
 
