@@ -916,6 +916,99 @@ def generate_csv(tagged, topics):
         w.writerow(r)
     return out.getvalue()
 
+
+# ============================================================
+# TEMPLATE GENERATOR (Manual Tagging — columns A-E only)
+# ============================================================
+def generate_template_excel(articles, monitor_date):
+    """Generate Excel template with only columns A-E populated (parser data).
+    Columns F onwards have headers but are blank for manual analyst tagging."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    wb = Workbook()
+    brands = ['Trane Technologies','Carrier','Honeywell','JCI','Daikin','Lennox']
+    topics = ['Sustainability','Decarbonization','Innovation','Energy Efficiency','Digitization',
+              'Electrification','Workforce Development','Financial Performance','No Category Match']
+    headers = ['Monitor Date','Date Published','Publication','Headline','Article OR Press Release',
+               'Sentiment'] + topics + ['CODED?','CEO/Executive Mention']
+    hf=Font(name='Calibri',bold=True,size=10,color='FFFFFF')
+    hfl=PatternFill(start_color='1e1e2a',end_color='1e1e2a',fill_type='solid')
+    df=Font(name='Calibri',size=10);lf=Font(name='Calibri',size=10,color='6366F1',underline='single')
+    pf=PatternFill(start_color='FFF2CC',end_color='FFF2CC',fill_type='solid')
+    bd=Border(left=Side(style='thin',color='D9D9D9'),right=Side(style='thin',color='D9D9D9'),top=Side(style='thin',color='D9D9D9'),bottom=Side(style='thin',color='D9D9D9'))
+    wb.remove(wb.active)
+    ws_tot=wb.create_sheet("Totals");ws_tot['B2']='Honeywell';ws_tot['C2']='Carrier';ws_tot['D2']='JCI';ws_tot['E2']='Daikin';ws_tot['F2']='Lennox';ws_tot['G2']='Trane'
+
+    # For template mode, distribute articles by section-based brand detection
+    for brand in brands:
+        ws=wb.create_sheet(brand)
+        for ci,h in enumerate(headers,1):c=ws.cell(row=1,column=ci,value=h);c.font=hf;c.fill=hfl;c.alignment=Alignment(horizontal='center',wrap_text=True);c.border=bd
+        ws.column_dimensions['A'].width=12;ws.column_dimensions['B'].width=14;ws.column_dimensions['C'].width=22;ws.column_dimensions['D'].width=55;ws.column_dimensions['E'].width=18;ws.column_dimensions['F'].width=12
+        for ci in range(7,16):ws.column_dimensions[chr(64+ci)].width=14
+        ws.column_dimensions['P'].width=8;ws.column_dimensions['Q'].width=20
+
+        ba = get_brand_articles_template(articles, brand)
+        for ri,art in enumerate(ba,2):
+            # Column A: Monitor Date
+            ws.cell(row=ri,column=1,value=art.get('monitor_date','')).font=df
+            # Column B: Date Published (from parser — may be empty, analyst fills in)
+            ws.cell(row=ri,column=2,value=art.get('date_published','')).font=df
+            # Column C: Publication
+            ws.cell(row=ri,column=3,value=art.get('publication','')).font=df
+            # Column D: Headline (hyperlinked if URL exists)
+            hc=ws.cell(row=ri,column=4,value=art.get('headline','') or '(no headline)')
+            url = art.get('url','')
+            if url and art.get('headline','').strip():
+                hc.hyperlink=url;hc.font=lf
+            else:
+                hc.font=df
+            # Column E: Article OR Press Release (blank — analyst fills in)
+            ws.cell(row=ri,column=5,value='').font=df
+            # Columns F-Q: ALL BLANK — analyst fills in manually
+            # Just apply borders and paywall highlighting
+            if art.get('is_paywall'):
+                for ci in range(1,18):ws.cell(row=ri,column=ci).fill=pf
+            for ci in range(1,18):ws.cell(row=ri,column=ci).border=bd
+        ws.freeze_panes='A2'
+    # Totals
+    cm={'Honeywell':'B','Carrier':'C','JCI':'D','Daikin':'E','Lennox':'F','Trane Technologies':'G'}
+    for b in brands:ws_tot[f'{cm.get(b,"B")}3']=len(get_brand_articles_template(articles,b))
+
+    ws_def=wb.create_sheet("Key Topics & Definitions");ws_def['A1']='Key Topics';ws_def['B1']='Definitions'
+    for di,(t,d) in enumerate([
+        ('Sustainability','Climate change action — brand actively implementing sustainability initiatives or achieving milestones'),
+        ('Decarbonization','Reducing carbon emissions — brand actively reducing carbon footprint or deploying low-carbon tech'),
+        ('Innovation','Advancing HVAC tech — brand launching new products, deploying new technology, R&D breakthroughs'),
+        ('Energy Efficiency','Optimized energy use — brand delivering measurably more efficient products/systems'),
+        ('Digitization','Digital tech, AI, IoT — brand deploying digital solutions, smart building tech, connected systems'),
+        ('Electrification','Electrification of heat — brand manufacturing/deploying heat pumps, electric HVAC, gas-to-electric conversion'),
+        ('Workforce Development','Training, upskilling — brand running training programs, hiring initiatives, apprenticeships'),
+        ('Financial Performance','Revenue, earnings, stock — all financial results, stock performance, analyst ratings, deals'),
+        ('No Category Match','Broader HVAC — none of the above 8 topics apply')
+    ],2):ws_def[f'A{di}']=t;ws_def[f'B{di}']=d
+    out=BytesIO();wb.save(out);out.seek(0);return out
+
+
+def get_brand_articles_template(articles, brand):
+    """Distribute parsed articles to brand tabs based on section and keyword matching.
+    Used for template mode (no AI tagging, so no brand.mentioned flags)."""
+    result=[];bl=brand.lower()
+    aliases={'trane technologies':['trane','metus','mitsubishi electric trane','thermo king'],
+             'carrier':['carrier global','carrier'],'honeywell':['honeywell'],
+             'jci':['johnson controls','jci'],'daikin':['daikin'],'lennox':['lennox']}
+    ba=aliases.get(bl,[bl])
+    for art in articles:
+        sec=art.get('section','').lower()
+        txt=(art.get('headline','')+' '+art.get('summary','')+' '+art.get('publication','')).lower()
+        # Trane section articles go to Trane tab
+        if bl=='trane technologies' and 'trane' in sec:
+            result.append(art); continue
+        # Benchmark and Trends articles: check if brand name or alias appears
+        if 'benchmark' in sec or 'trends' in sec:
+            for a in ba:
+                if a in txt:result.append(art);break
+    return result
+
 def load_analyst_examples(ef):
     from openpyxl import load_workbook
     try:
@@ -1068,26 +1161,50 @@ def main():
             </div>""", unsafe_allow_html=True)
 
             if not api_key:
-                st.warning("⚠️ Enter your Claude API Key in the sidebar."); return
+                st.warning("⚠️ Enter your Claude API Key in the sidebar to use AI Tagging.")
 
-            if st.button("🚀 Start AI Tagging", type="primary", use_container_width=True):
-                analyst_ex = load_analyst_examples(uploaded_excel) if uploaded_excel else ""
-                pbar = st.progress(0); stxt = st.empty(); larea = st.empty(); logs = []
-                def pcb(p, m):
-                    pbar.progress(min(p,1.0))
-                    stxt.markdown(f'<div style="font-size:0.85rem;font-weight:600;color:#667eea;padding:0.2rem 0;">{m}</div>', unsafe_allow_html=True)
-                    logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {m}")
-                    larea.markdown(f'<div style="background:#ffffff;border:1px solid #e8e9ee;border-radius:12px;padding:0.5rem 0.8rem;font-family:JetBrains Mono,monospace;font-size:0.7rem;color:#4a5568;white-space:pre-wrap;line-height:1.5;">{chr(10).join(logs[-8:])}</div>', unsafe_allow_html=True)
-                pcb(0.05, "Starting parallel processing...")
-                tagged = tag_articles_batch(articles, api_key, analyst_ex, pcb)
-                st.session_state.tagged_articles = tagged
-                low_conf = sum(1 for t in tagged if t.get('confidence',{}).get('overall') == 'low')
-                ok_count = sum(1 for t in tagged if not t.get('tags_failed'))
-                st.session_state.chat_messages = [{'role':'assistant','content':
-                    f"✅ **{ok_count}/{len(tagged)}** articles tagged.\n\n"
-                    + (f"⚠️ **{low_conf} articles** have low confidence. Ask: *'show low confidence articles'*\n\n" if low_conf > 0 else "")
-                    + "**What you can do:**\n- Review articles (tiles/table) on the left\n- Chat here to correct: *'change #5 sentiment to Positive'*\n- Ask: *'why is article 8 tagged Decarbonization?'*\n- Export: *'generate Excel'*"}]
-                st.rerun()
+            st.markdown("---")
+            st.markdown("**Choose your workflow:**")
+            btn_col1, btn_col2 = st.columns(2)
+
+            with btn_col1:
+                st.markdown("""<div style="background:#f0fff4;border:1px solid #c6f6d5;border-radius:12px;padding:0.8rem;margin-bottom:0.5rem;">
+                    <div style="font-weight:700;color:#276749;font-size:0.9rem;">📋 Template for Manual Tagging</div>
+                    <div style="font-size:0.75rem;color:#4a5568;margin-top:0.3rem;">Parser fills columns A–D (Monitor Date, Date Published, Publication, Headline with hyperlinks). Columns E onwards are blank for analysts to tag manually.</div>
+                </div>""", unsafe_allow_html=True)
+                sd = md.replace(' ','_').replace('.','') if md else 'report'
+                template_data = generate_template_excel(articles, md)
+                st.download_button("📋 Download Template Excel", data=template_data,
+                    file_name=f"TT_Template_{sd}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True)
+
+            with btn_col2:
+                st.markdown("""<div style="background:#ebf4ff;border:1px solid #bee3f8;border-radius:12px;padding:0.8rem;margin-bottom:0.5rem;">
+                    <div style="font-weight:700;color:#3182ce;font-size:0.9rem;">🤖 AI Auto-Tagging</div>
+                    <div style="font-size:0.75rem;color:#4a5568;margin-top:0.3rem;">AI reads each article, tags sentiment, topics, CEO mentions, article/PR type. Review and edit via chat agent. Requires API key.</div>
+                </div>""", unsafe_allow_html=True)
+                if api_key:
+                    if st.button("🚀 Start AI Tagging", type="primary", use_container_width=True):
+                        analyst_ex = load_analyst_examples(uploaded_excel) if uploaded_excel else ""
+                        pbar = st.progress(0); stxt = st.empty(); larea = st.empty(); logs = []
+                        def pcb(p, m):
+                            pbar.progress(min(p,1.0))
+                            stxt.markdown(f'<div style="font-size:0.85rem;font-weight:600;color:#667eea;padding:0.2rem 0;">{m}</div>', unsafe_allow_html=True)
+                            logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {m}")
+                            larea.markdown(f'<div style="background:#ffffff;border:1px solid #e8e9ee;border-radius:12px;padding:0.5rem 0.8rem;font-family:JetBrains Mono,monospace;font-size:0.7rem;color:#4a5568;white-space:pre-wrap;line-height:1.5;">{chr(10).join(logs[-8:])}</div>', unsafe_allow_html=True)
+                        pcb(0.05, "Starting parallel processing...")
+                        tagged = tag_articles_batch(articles, api_key, analyst_ex, pcb)
+                        st.session_state.tagged_articles = tagged
+                        low_conf = sum(1 for t in tagged if t.get('confidence',{}).get('overall') == 'low')
+                        ok_count = sum(1 for t in tagged if not t.get('tags_failed'))
+                        st.session_state.chat_messages = [{'role':'assistant','content':
+                            f"✅ **{ok_count}/{len(tagged)}** articles tagged.\n\n"
+                            + (f"⚠️ **{low_conf} articles** have low confidence. Ask: *'show low confidence articles'*\n\n" if low_conf > 0 else "")
+                            + "**What you can do:**\n- Review articles (tiles/table) on the left\n- Chat here to correct: *'change #5 sentiment to Positive'*\n- Ask: *'why is article 8 tagged Decarbonization?'*\n- Export: *'generate Excel'*"}]
+                        st.rerun()
+                else:
+                    st.info("Enter API key in sidebar to enable AI tagging.")
         return
 
     # ==========================================
