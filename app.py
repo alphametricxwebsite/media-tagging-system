@@ -1111,71 +1111,126 @@ def generate_csv(tagged, topics):
 # TEMPLATE GENERATOR (Manual Tagging — columns A-E only)
 # ============================================================
 def generate_template_excel(articles, monitor_date):
-    """Generate Excel template with only columns A-E populated (parser data).
-    Columns F onwards have headers but are blank for manual analyst tagging."""
+    """Generate Excel template with columns A-D populated (parser data).
+    Columns E onwards have headers but are blank for manual analyst tagging.
+    Auto-detects format: Trane-style (brand tabs) vs generic (section tabs)."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     wb = Workbook()
     brands = ['Trane Technologies','Carrier','Honeywell','JCI','Daikin','Lennox']
-    topics = ['Sustainability','Decarbonization','Innovation','Energy Efficiency','Digitization',
-              'Electrification','Workforce Development','Financial Performance','No Category Match']
+    trane_keywords = ['trane','carrier','honeywell','johnson controls','jci','daikin','lennox','metus','thermo king']
+
+    # Detect if this is a Trane-format document by checking sections/content
+    all_text = ' '.join((a.get('section','')+' '+a.get('headline','')+' '+a.get('summary','')).lower() for a in articles)
+    is_trane_format = any(kw in all_text for kw in trane_keywords)
+
+    # Common headers and styles
     headers = ['Monitor Date','Date Published','Publication','Headline','Article OR Press Release',
-               'Sentiment'] + topics + ['CODED?','CEO/Executive Mention']
+               'Sentiment','Notes']
     hf=Font(name='Calibri',bold=True,size=10,color='FFFFFF')
     hfl=PatternFill(start_color='1e1e2a',end_color='1e1e2a',fill_type='solid')
     df=Font(name='Calibri',size=10);lf=Font(name='Calibri',size=10,color='6366F1',underline='single')
     pf=PatternFill(start_color='FFF2CC',end_color='FFF2CC',fill_type='solid')
     bd=Border(left=Side(style='thin',color='D9D9D9'),right=Side(style='thin',color='D9D9D9'),top=Side(style='thin',color='D9D9D9'),bottom=Side(style='thin',color='D9D9D9'))
     wb.remove(wb.active)
-    ws_tot=wb.create_sheet("Totals");ws_tot['B2']='Honeywell';ws_tot['C2']='Carrier';ws_tot['D2']='JCI';ws_tot['E2']='Daikin';ws_tot['F2']='Lennox';ws_tot['G2']='Trane'
 
-    # For template mode, distribute articles by section-based brand detection
-    for brand in brands:
-        ws=wb.create_sheet(brand)
-        for ci,h in enumerate(headers,1):c=ws.cell(row=1,column=ci,value=h);c.font=hf;c.fill=hfl;c.alignment=Alignment(horizontal='center',wrap_text=True);c.border=bd
-        ws.column_dimensions['A'].width=12;ws.column_dimensions['B'].width=14;ws.column_dimensions['C'].width=22;ws.column_dimensions['D'].width=55;ws.column_dimensions['E'].width=18;ws.column_dimensions['F'].width=12
-        for ci in range(7,16):ws.column_dimensions[chr(64+ci)].width=14
-        ws.column_dimensions['P'].width=8;ws.column_dimensions['Q'].width=20
-
-        ba = get_brand_articles_template(articles, brand)
-        for ri,art in enumerate(ba,2):
-            # Column A: Monitor Date
+    def _write_articles_to_sheet(ws, article_list):
+        """Write articles to a worksheet (columns A-D populated, rest blank)."""
+        for ci,h in enumerate(headers,1):
+            c=ws.cell(row=1,column=ci,value=h);c.font=hf;c.fill=hfl;c.alignment=Alignment(horizontal='center',wrap_text=True);c.border=bd
+        ws.column_dimensions['A'].width=12;ws.column_dimensions['B'].width=14;ws.column_dimensions['C'].width=22
+        ws.column_dimensions['D'].width=60;ws.column_dimensions['E'].width=18;ws.column_dimensions['F'].width=12;ws.column_dimensions['G'].width=30
+        for ri,art in enumerate(article_list,2):
             ws.cell(row=ri,column=1,value=art.get('monitor_date','')).font=df
-            # Column B: Date Published (from parser — may be empty, analyst fills in)
             ws.cell(row=ri,column=2,value=art.get('date_published','')).font=df
-            # Column C: Publication
             ws.cell(row=ri,column=3,value=art.get('publication','')).font=df
-            # Column D: Headline (hyperlinked if URL exists)
             hc=ws.cell(row=ri,column=4,value=art.get('headline','') or '(no headline)')
             url = art.get('url','')
             if url and art.get('headline','').strip():
                 hc.hyperlink=url;hc.font=lf
             else:
                 hc.font=df
-            # Column E: Article OR Press Release (blank — analyst fills in)
-            ws.cell(row=ri,column=5,value='').font=df
-            # Columns F-Q: ALL BLANK — analyst fills in manually
-            # Just apply borders and paywall highlighting
+            ws.cell(row=ri,column=5,value='').font=df  # Article/PR — analyst fills in
+            ws.cell(row=ri,column=6,value='').font=df  # Sentiment — analyst fills in
+            ws.cell(row=ri,column=7,value='').font=df  # Notes
             if art.get('is_paywall'):
-                for ci in range(1,18):ws.cell(row=ri,column=ci).fill=pf
-            for ci in range(1,18):ws.cell(row=ri,column=ci).border=bd
+                for ci in range(1,len(headers)+1):ws.cell(row=ri,column=ci).fill=pf
+            for ci in range(1,len(headers)+1):ws.cell(row=ri,column=ci).border=bd
         ws.freeze_panes='A2'
-    # Totals
-    cm={'Honeywell':'B','Carrier':'C','JCI':'D','Daikin':'E','Lennox':'F','Trane Technologies':'G'}
-    for b in brands:ws_tot[f'{cm.get(b,"B")}3']=len(get_brand_articles_template(articles,b))
 
-    ws_def=wb.create_sheet("Key Topics & Definitions");ws_def['A1']='Key Topics';ws_def['B1']='Definitions'
-    for di,(t,d) in enumerate([
-        ('Sustainability','Climate change action — brand actively implementing sustainability initiatives or achieving milestones'),
-        ('Decarbonization','Reducing carbon emissions — brand actively reducing carbon footprint or deploying low-carbon tech'),
-        ('Innovation','Advancing HVAC tech — brand launching new products, deploying new technology, R&D breakthroughs'),
-        ('Energy Efficiency','Optimized energy use — brand delivering measurably more efficient products/systems'),
-        ('Digitization','Digital tech, AI, IoT — brand deploying digital solutions, smart building tech, connected systems'),
-        ('Electrification','Electrification of heat — brand manufacturing/deploying heat pumps, electric HVAC, gas-to-electric conversion'),
-        ('Workforce Development','Training, upskilling — brand running training programs, hiring initiatives, apprenticeships'),
-        ('Financial Performance','Revenue, earnings, stock — all financial results, stock performance, analyst ratings, deals'),
-        ('No Category Match','Broader HVAC — none of the above 8 topics apply')
-    ],2):ws_def[f'A{di}']=t;ws_def[f'B{di}']=d
+    if is_trane_format:
+        # TRANE FORMAT: Brand tabs + topic columns
+        topics = ['Sustainability','Decarbonization','Innovation','Energy Efficiency','Digitization',
+                  'Electrification','Workforce Development','Financial Performance','No Category Match']
+        headers = ['Monitor Date','Date Published','Publication','Headline','Article OR Press Release',
+                   'Sentiment'] + topics + ['CODED?','CEO/Executive Mention']
+        ws_tot=wb.create_sheet("Totals")
+        ws_tot['B2']='Honeywell';ws_tot['C2']='Carrier';ws_tot['D2']='JCI';ws_tot['E2']='Daikin';ws_tot['F2']='Lennox';ws_tot['G2']='Trane'
+        for brand in brands:
+            ws=wb.create_sheet(brand)
+            for ci,h in enumerate(headers,1):c=ws.cell(row=1,column=ci,value=h);c.font=hf;c.fill=hfl;c.alignment=Alignment(horizontal='center',wrap_text=True);c.border=bd
+            ws.column_dimensions['A'].width=12;ws.column_dimensions['B'].width=14;ws.column_dimensions['C'].width=22;ws.column_dimensions['D'].width=55;ws.column_dimensions['E'].width=18;ws.column_dimensions['F'].width=12
+            for ci in range(7,16):ws.column_dimensions[chr(64+ci)].width=14
+            ws.column_dimensions['P'].width=8;ws.column_dimensions['Q'].width=20
+            ba = get_brand_articles_template(articles, brand)
+            for ri,art in enumerate(ba,2):
+                ws.cell(row=ri,column=1,value=art.get('monitor_date','')).font=df
+                ws.cell(row=ri,column=2,value=art.get('date_published','')).font=df
+                ws.cell(row=ri,column=3,value=art.get('publication','')).font=df
+                hc=ws.cell(row=ri,column=4,value=art.get('headline','') or '(no headline)')
+                url = art.get('url','')
+                if url and art.get('headline','').strip():hc.hyperlink=url;hc.font=lf
+                else:hc.font=df
+                ws.cell(row=ri,column=5,value='').font=df
+                if art.get('is_paywall'):
+                    for ci in range(1,18):ws.cell(row=ri,column=ci).fill=pf
+                for ci in range(1,18):ws.cell(row=ri,column=ci).border=bd
+            ws.freeze_panes='A2'
+        cm={'Honeywell':'B','Carrier':'C','JCI':'D','Daikin':'E','Lennox':'F','Trane Technologies':'G'}
+        for b in brands:ws_tot[f'{cm.get(b,"B")}3']=len(get_brand_articles_template(articles,b))
+        ws_def=wb.create_sheet("Key Topics & Definitions");ws_def['A1']='Key Topics';ws_def['B1']='Definitions'
+        for di,(t,d) in enumerate([
+            ('Sustainability','Climate change action'),('Decarbonization','Reducing carbon emissions'),
+            ('Innovation','Advancing technologies'),('Energy Efficiency','Optimized energy use'),
+            ('Digitization','Digital tech, AI, IoT'),('Electrification','Electrification of heat'),
+            ('Workforce Development','Training, upskilling'),('Financial Performance','Revenue, earnings, stock'),
+            ('No Category Match','Broader industry news')
+        ],2):ws_def[f'A{di}']=t;ws_def[f'B{di}']=d
+    else:
+        # GENERIC FORMAT: One tab per document section, or single "All Articles" tab
+        sections = {}
+        for art in articles:
+            sec = art.get('section', 'General')
+            if sec not in sections: sections[sec] = []
+            sections[sec].append(art)
+
+        # Create a summary/totals sheet
+        ws_tot = wb.create_sheet("Summary")
+        ws_tot.cell(row=1, column=1, value="Section").font = hf
+        ws_tot.cell(row=1, column=2, value="Articles").font = hf
+        ws_tot.cell(row=1, column=1).fill = hfl
+        ws_tot.cell(row=1, column=2).fill = hfl
+        ws_tot.column_dimensions['A'].width = 35
+        ws_tot.column_dimensions['B'].width = 12
+
+        for si, (sec_name, sec_articles) in enumerate(sections.items()):
+            # Summary row
+            ws_tot.cell(row=si+2, column=1, value=sec_name).font = df
+            ws_tot.cell(row=si+2, column=2, value=len(sec_articles)).font = df
+
+            # Create tab for each section (truncate name to 31 chars for Excel limit)
+            tab_name = sec_name[:31].replace('/', '-').replace('\\', '-').replace('*', '').replace('?', '').replace('[', '').replace(']', '')
+            # Avoid duplicate tab names
+            existing = [ws.title for ws in wb.worksheets]
+            if tab_name in existing:
+                tab_name = tab_name[:28] + f" ({si})"
+            ws = wb.create_sheet(tab_name)
+            _write_articles_to_sheet(ws, sec_articles)
+
+        # Also create an "All Articles" tab with everything
+        ws_all = wb.create_sheet("All Articles")
+        _write_articles_to_sheet(ws_all, articles)
+
     out=BytesIO();wb.save(out);out.seek(0);return out
 
 
