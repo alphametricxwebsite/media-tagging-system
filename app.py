@@ -1275,6 +1275,30 @@ def load_analyst_examples(ef):
 # ============================================================
 # MAIN UI — SIDEBAR RESTORED + SPLIT SCREEN
 # ============================================================
+def _derive_project_name(filename):
+    """Derive a short project name from the uploaded filename.
+    'Daily Monitor Trane - 03.16.26.docx' → 'Trane'
+    'Daily_News_Summary_Report_-_April_14__2026___.docx' → 'News_Summary_Report'
+    """
+    import os
+    name = os.path.splitext(filename)[0]
+    # Remove common prefixes
+    for remove in ['Daily Monitor ', 'Daily_Monitor_', 'Daily_']:
+        name = name.replace(remove, ' ')
+    # Remove separators
+    for remove in ['_-_', ' - ', '___', '__']:
+        name = name.replace(remove, ' ')
+    # Remove date patterns (numeric and word-based)
+    name = re.sub(r'\d{2}[._]\d{2}[._]\d{2,4}', '', name)
+    name = re.sub(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s*\d{0,2}\s*,?\s*\d{0,4}', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\b\d{4}\b', '', name)
+    # Clean up
+    name = re.sub(r'[_\s]+', ' ', name).strip().strip('-').strip()
+    if not name or len(name) < 2:
+        name = os.path.splitext(filename)[0][:30]
+    return name.replace(' ', '_')
+
+
 def main():
     # Header
     st.markdown("""<div class="main-header">
@@ -1347,7 +1371,7 @@ def main():
             st.markdown(f"**CEO mentions:** {sum(1 for a in tagged if a.get('ceo_mention'))}")
 
     # === Initialize session state ===
-    for key in ['chat_messages', 'tagged_articles', 'monitor_date', 'parsed_articles', 'section_filter']:
+    for key in ['chat_messages', 'tagged_articles', 'monitor_date', 'parsed_articles', 'section_filter', 'project_name']:
         if key not in st.session_state:
             st.session_state[key] = [] if key == 'chat_messages' else (None if key in ('tagged_articles','parsed_articles') else '')
 
@@ -1386,6 +1410,7 @@ def main():
                     art['is_paywall'] = True; art['paywall_reason'] = 'no_url'
             st.session_state.parsed_articles = articles
             st.session_state.monitor_date = md
+            st.session_state.project_name = _derive_project_name(uploaded_docx.name)
             st.rerun()
 
         if st.session_state.parsed_articles is not None and st.session_state.tagged_articles is None:
@@ -1420,7 +1445,7 @@ def main():
                 sd = md.replace(' ','_').replace('.','') if md else 'report'
                 template_data = generate_template_excel(articles, md)
                 st.download_button("📋 Download Template Excel", data=template_data,
-                    file_name=f"TT_Template_{sd}.xlsx",
+                    file_name=f"{st.session_state.get('project_name','Report')}_Template_{sd}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True)
 
@@ -1479,11 +1504,11 @@ def main():
     dl1, dl2, dl3 = st.columns([2, 2, 6])
     with dl1:
         st.download_button("📥 Download Excel", data=generate_excel(tagged,md),
-            file_name=f"TT_Tagged_{sd}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            file_name=f"{st.session_state.get('project_name','Report')}_Tagged_{sd}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary", use_container_width=True)
     with dl2:
         st.download_button("📥 Download CSV", data=generate_csv(tagged,topics),
-            file_name=f"TT_Tagged_{sd}.csv", mime="text/csv", use_container_width=True)
+            file_name=f"{st.session_state.get('project_name','Report')}_Tagged_{sd}.csv", mime="text/csv", use_container_width=True)
 
     # Split: 60% results, 40% chat
     left_col, right_col = st.columns([60, 40])
@@ -1531,7 +1556,7 @@ def main():
                         changes = apply_chat_changes(tagged, response)
                         if changes == -1:
                             st.markdown("Generating report...")
-                            st.download_button("📥 Download Excel", data=generate_excel(tagged,md), file_name=f"TT_Tagged_{sd}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                            st.download_button("📥 Download Excel", data=generate_excel(tagged,md), file_name=f"{st.session_state.get('project_name','Report')}_Tagged_{sd}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                             rc = "📊 Report ready — click download above."
                         elif changes > 0:
                             rc = re.sub(r'\{[^}]*"action"[^}]*\}','',response,flags=re.DOTALL).strip()
