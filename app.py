@@ -343,95 +343,123 @@ def parse_docx(file_bytes, filename=""):
         ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
               'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'}
         tables = root.findall('.//w:tbl', ns)
-        if not tables: return [], monitor_date
-        rows = tables[0].findall('.//w:tr', ns)
-        current_section = "Trane Technologies"
-        for ri, row in enumerate(rows):
-            cells = row.findall('.//w:tc', ns)
-            if not cells: continue
-            paragraphs = cells[0].findall('.//w:p', ns)
-            para_data = []
-            # Track field code state ACROSS paragraphs (fldChar begin/end can span P1→P2)
-            in_field = False
-            field_url = ''
-            field_text_parts = []
-            field_start_para = -1
-            for pi, p in enumerate(paragraphs):
-                parts, hl_list = [], []
-                # Method 1: Standard w:hyperlink elements
-                for hl in p.findall('./w:hyperlink', ns):
-                    rid = hl.attrib.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id', '')
-                    hl_t = ''.join(t.text for r in hl.findall('.//w:r', ns) for t in r.findall('.//w:t', ns) if t.text).strip()
-                    url = hyperlinks.get(rid, '')
-                    if hl_t or url: hl_list.append({'text': hl_t, 'url': url}); parts.append(hl_t)
-                # Method 2: Field code hyperlinks (fldChar + instrText)
-                runs = p.findall('./w:r', ns)
-                for r in runs:
-                    fld = r.find('.//w:fldChar', ns)
-                    instr = r.find('.//w:instrText', ns)
-                    if fld is not None:
-                        fld_type = ''
-                        for attr_key in fld.attrib:
-                            if 'fldCharType' in attr_key:
-                                fld_type = fld.attrib[attr_key]
-                        if fld_type == 'begin':
-                            in_field = True; field_url = ''; field_text_parts = []; field_start_para = pi
-                        elif fld_type == 'separate':
-                            pass
-                        elif fld_type == 'end':
-                            if field_url:
-                                ft = ''.join(field_text_parts).strip()
-                                if ft or field_url:
-                                    if field_start_para == pi:
-                                        hl_list.append({'text': ft, 'url': field_url})
-                                        parts.append(ft)
-                                    elif field_start_para >= 0 and field_start_para < len(para_data):
-                                        para_data[field_start_para]['hyperlinks'].append({'text': ft, 'url': field_url})
-                                        para_data[field_start_para]['text'] = (para_data[field_start_para]['text'] + ' ' + ft).strip()
-                            in_field = False; field_url = ''; field_text_parts = []; field_start_para = -1
-                    elif instr is not None and instr.text:
-                        m = re.search(r'HYPERLINK\s+"([^"]+)"', instr.text)
-                        if m: field_url = m.group(1)
-                    elif in_field and field_url:
-                        for t in r.findall('.//w:t', ns):
-                            if t.text: field_text_parts.append(t.text)
-                    else:
-                        if not in_field:
-                            for t in r.findall('.//w:t', ns):
-                                if t.text: parts.append(t.text)
-                para_data.append({'text': ''.join(parts).strip(), 'hyperlinks': hl_list})
-            full = ' '.join(p['text'] for p in para_data).strip()
-            fl = full.lower()
-            if ri < 3: continue
-            if 'benchmark companies' in fl: current_section = "Benchmark Companies"; continue
-            if 'trends' in fl and ('issues' in fl or 'government' in fl): current_section = "Trends / Issues / Government Relations"; continue
-            if fl in ('trane technologies', 'trane tech'): current_section = "Trane Technologies"; continue
-            if not full or len(full) < 10: continue
-            article = parse_article_cell(para_data, current_section, monitor_date)
-            if article:
-                articles.append(article)
-                for exp in parse_expansion_pubs(para_data):
-                    exp.update({'section': current_section, 'monitor_date': monitor_date,
-                               'parent_headline': article['headline'], 'parent_summary': article.get('summary','')})
-                    # Use parent headline for expansion articles that have no headline of their own
-                    if not exp.get('headline'):
-                        exp['headline'] = article['headline']
-                    articles.append(exp)
+        if tables and len(tables[0].findall('.//w:tr', ns)) > 3:
+            # TABLE-BASED FORMAT (e.g., Trane daily monitor)
+            articles = _parse_table_format(tables[0], hyperlinks, ns, monitor_date)
+        else:
+            # PARAGRAPH-BASED FORMAT (e.g., pharma daily news summary)
+            body = root.find('.//w:body', ns)
+            if body is not None:
+                articles = _parse_paragraph_format(body, hyperlinks, ns, monitor_date)
     return articles, monitor_date
 
+
+def _parse_table_format(table, hyperlinks, ns, monitor_date):
+    """Parse table-based docx format (e.g., Trane daily monitor)."""
+    articles = []
+    rows = table.findall('.//w:tr', ns)
+    current_section = "General"
+    for ri, row in enumerate(rows):
+        cells = row.findall('.//w:tc', ns)
+        if not cells: continue
+        paragraphs = cells[0].findall('.//w:p', ns)
+        para_data = []
+        # Track field code state ACROSS paragraphs (fldChar begin/end can span P1→P2)
+        in_field = False
+        field_url = ''
+        field_text_parts = []
+        field_start_para = -1
+        for pi, p in enumerate(paragraphs):
+            parts, hl_list = [], []
+            # Method 1: Standard w:hyperlink elements
+            for hl in p.findall('./w:hyperlink', ns):
+                rid = hl.attrib.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id', '')
+                hl_t = ''.join(t.text for r in hl.findall('.//w:r', ns) for t in r.findall('.//w:t', ns) if t.text).strip()
+                url = hyperlinks.get(rid, '')
+                if hl_t or url: hl_list.append({'text': hl_t, 'url': url}); parts.append(hl_t)
+            # Method 2: Field code hyperlinks (fldChar + instrText)
+            runs = p.findall('./w:r', ns)
+            for r in runs:
+                fld = r.find('.//w:fldChar', ns)
+                instr = r.find('.//w:instrText', ns)
+                if fld is not None:
+                    fld_type = ''
+                    for attr_key in fld.attrib:
+                        if 'fldCharType' in attr_key:
+                            fld_type = fld.attrib[attr_key]
+                    if fld_type == 'begin':
+                        in_field = True; field_url = ''; field_text_parts = []; field_start_para = pi
+                    elif fld_type == 'separate':
+                        pass
+                    elif fld_type == 'end':
+                        if field_url:
+                            ft = ''.join(field_text_parts).strip()
+                            if ft or field_url:
+                                if field_start_para == pi:
+                                    hl_list.append({'text': ft, 'url': field_url})
+                                    parts.append(ft)
+                                elif field_start_para >= 0 and field_start_para < len(para_data):
+                                    para_data[field_start_para]['hyperlinks'].append({'text': ft, 'url': field_url})
+                                    para_data[field_start_para]['text'] = (para_data[field_start_para]['text'] + ' ' + ft).strip()
+                        in_field = False; field_url = ''; field_text_parts = []; field_start_para = -1
+                elif instr is not None and instr.text:
+                    m = re.search(r'HYPERLINK\s+"([^"]+)"', instr.text)
+                    if m: field_url = m.group(1)
+                elif in_field and field_url:
+                    for t in r.findall('.//w:t', ns):
+                        if t.text: field_text_parts.append(t.text)
+                else:
+                    if not in_field:
+                        for t in r.findall('.//w:t', ns):
+                            if t.text: parts.append(t.text)
+            para_data.append({'text': ''.join(parts).strip(), 'hyperlinks': hl_list})
+        full = ' '.join(p['text'] for p in para_data).strip()
+        fl = full.lower()
+        if ri < 3: continue
+        # Detect section headers (generic — works for any document)
+        if 'benchmark companies' in fl or 'benchmark' == fl: current_section = "Benchmark Companies"; continue
+        if 'trends' in fl and ('issues' in fl or 'government' in fl): current_section = "Trends / Issues / Government Relations"; continue
+        # Generic section header: short text, all caps or title-like, no hyperlinks
+        is_section_header = (len(full) < 80 and not any(pd.get('hyperlinks') for pd in para_data)
+                            and (full.upper() == full or full.istitle()) and 'summary' not in fl)
+        if is_section_header and len(para_data) <= 2 and fl not in ('', 'summary:', 'translated from'):
+            current_section = full.strip()
+            continue
+        if not full or len(full) < 10: continue
+        article = parse_article_cell(para_data, current_section, monitor_date)
+        if article:
+            articles.append(article)
+            for exp in parse_expansion_pubs(para_data):
+                exp.update({'section': current_section, 'monitor_date': monitor_date,
+                           'parent_headline': article['headline'], 'parent_summary': article.get('summary','')})
+                # Use parent headline for expansion articles that have no headline of their own
+                if not exp.get('headline'):
+                    exp['headline'] = article['headline']
+                articles.append(exp)
+    return articles
+
 def extract_monitor_date(fn):
-    """Extract monitor date from filename. Tries MM.DD.YY, MM.DD.YYYY, MM-DD-YY, etc."""
-    names = {'01':'Jan.','02':'Feb.','03':'Mar.','04':'Apr.','05':'May','06':'Jun.',
+    """Extract monitor date from filename. Tries MM.DD.YY, MM.DD.YYYY, MM-DD-YY, etc.
+    Also tries 'April 14, 2026' style from filename."""
+    names_num = {'01':'Jan.','02':'Feb.','03':'Mar.','04':'Apr.','05':'May','06':'Jun.',
              '07':'Jul.','08':'Aug.','09':'Sep.','10':'Oct.','11':'Nov.','12':'Dec.'}
-    # Try MM.DD.YYYY or MM.DD.YY patterns
+    names_word = {'january':'Jan.','february':'Feb.','march':'Mar.','april':'Apr.','may':'May',
+                  'june':'Jun.','july':'Jul.','august':'Aug.','september':'Sep.','october':'Oct.',
+                  'november':'Nov.','december':'Dec.'}
+    # Try numeric: MM.DD.YY or MM.DD.YYYY
     for pat in [r'(\d{1,2})[._-](\d{1,2})[._-](\d{4})', r'(\d{1,2})[._-](\d{1,2})[._-](\d{2})']:
         m = re.search(pat, fn)
         if m:
-            g1, g2, g3 = m.group(1).zfill(2), m.group(2).zfill(2), m.group(3)
-            # g1=month, g2=day, g3=year
-            month_str = names.get(g1, g1)
+            g1, g2 = m.group(1).zfill(2), m.group(2).zfill(2)
+            month_str = names_num.get(g1, g1)
             day = int(g2)
             return f"{month_str} {day}"
+    # Try word-based: "April 14, 2026" or "April_14__2026"
+    m = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)[_\s,]+(\d{1,2})', fn, re.IGNORECASE)
+    if m:
+        month_str = names_word.get(m.group(1).lower(), m.group(1)[:3] + '.')
+        day = int(m.group(2))
+        return f"{month_str} {day}"
     return ""
 
 def parse_article_cell(para_data, section, monitor_date):
@@ -474,6 +502,165 @@ def parse_expansion_pubs(para_data):
                 exps.append({'publication': hl['text'], 'headline': '', 'url': hl['url'],
                             'summary': '', 'is_translated': False, 'is_paywall': False, 'is_expansion': True})
     return exps
+
+
+def _extract_para_text_and_links(p, hyperlinks, ns):
+    """Extract text and hyperlinks from a single paragraph element."""
+    parts, hl_list = [], []
+    # Standard w:hyperlink
+    for hl in p.findall('./w:hyperlink', ns):
+        rid = hl.attrib.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id', '')
+        hl_t = ''.join(t.text for r in hl.findall('.//w:r', ns) for t in r.findall('.//w:t', ns) if t.text).strip()
+        url = hyperlinks.get(rid, '')
+        if hl_t or url: hl_list.append({'text': hl_t, 'url': url}); parts.append(hl_t)
+    # Field code hyperlinks
+    runs = p.findall('./w:r', ns)
+    in_field = False; field_url = ''; field_text_parts = []
+    for r in runs:
+        fld = r.find('.//w:fldChar', ns)
+        instr = r.find('.//w:instrText', ns)
+        if fld is not None:
+            fld_type = ''
+            for ak in fld.attrib:
+                if 'fldCharType' in ak: fld_type = fld.attrib[ak]
+            if fld_type == 'begin': in_field = True; field_url = ''; field_text_parts = []
+            elif fld_type == 'end':
+                if field_url:
+                    ft = ''.join(field_text_parts).strip()
+                    if ft or field_url: hl_list.append({'text': ft, 'url': field_url}); parts.append(ft)
+                in_field = False; field_url = ''; field_text_parts = []
+        elif instr is not None and instr.text:
+            m = re.search(r'HYPERLINK\s+"([^"]+)"', instr.text)
+            if m: field_url = m.group(1)
+        elif in_field and field_url:
+            for t in r.findall('.//w:t', ns):
+                if t.text: field_text_parts.append(t.text)
+        else:
+            if not in_field:
+                for t in r.findall('.//w:t', ns):
+                    if t.text: parts.append(t.text)
+    return ''.join(parts).strip(), hl_list
+
+
+def _parse_paragraph_format(body, hyperlinks, ns, monitor_date):
+    """Parse paragraph-based docx format (e.g., pharma daily news, generic reports).
+    Detects articles by finding hyperlinked headlines followed by summary text."""
+    articles = []
+    paragraphs = body.findall('./w:p', ns)
+    current_section = "General"
+    # Known section patterns
+    section_keywords = ['back to top', 'tweets of interest']
+
+    i = 0
+    while i < len(paragraphs):
+        text, hls = _extract_para_text_and_links(paragraphs[i], hyperlinks, ns)
+        tl = text.lower().strip()
+
+        # Skip empty paragraphs
+        if not text.strip():
+            i += 1; continue
+
+        # Skip "Back to Top" links and tweet sections
+        if any(kw in tl for kw in section_keywords):
+            i += 1; continue
+
+        # Detect section headers (short, no hyperlinks, looks like a heading)
+        if (len(text) < 100 and not hls and not tl.startswith('(subscription')
+            and not tl.startswith('202') and not any(c.isdigit() for c in text[:4])
+            and text.strip() and len(text.split()) <= 12):
+            # Check if it looks like a section header (title case, or all words capitalized)
+            words = text.strip().split()
+            cap_words = sum(1 for w in words if w[0].isupper() or w in ('&', 'of', 'and', 'the', 'for', 'in', 'to', 'a'))
+            if cap_words >= len(words) * 0.7 and len(words) >= 2:
+                current_section = text.strip()
+                i += 1; continue
+
+        # Detect articles: paragraph with a hyperlink (headline link)
+        if hls and hls[0].get('url') and not hls[0]['url'].startswith('#'):
+            headline = hls[0]['text'] or text
+            url = hls[0]['url']
+            publication = ''
+            date_published = ''
+
+            # Try to extract date and publication from the NEXT paragraph
+            # Pattern: "2026/04/13, Publication Name by Author..."
+            # or: "2026/04/13, Publication Name"
+            summary_parts = []
+            also_covered = []
+            j = i + 1
+            while j < len(paragraphs):
+                ntxt, nhls = _extract_para_text_and_links(paragraphs[j], hyperlinks, ns)
+                ntl = ntxt.lower().strip()
+                if not ntxt.strip():
+                    j += 1; continue
+                # Check for date/publication line: "2026/04/13, Source Name..."
+                date_match = re.match(r'(\d{4}/\d{2}/\d{2})\s*,\s*(.+)', ntxt)
+                if date_match and not publication:
+                    raw_date = date_match.group(1)
+                    rest = date_match.group(2).strip()
+                    # Parse date
+                    try:
+                        dp = raw_date.split('/')
+                        mn = {'01':'Jan.','02':'Feb.','03':'Mar.','04':'Apr.','05':'May','06':'Jun.',
+                              '07':'Jul.','08':'Aug.','09':'Sep.','10':'Oct.','11':'Nov.','12':'Dec.'}
+                        date_published = f"{mn.get(dp[1], dp[1])} {int(dp[2])}"
+                    except: pass
+                    # Extract publication: "Source Name by Author" or "Source Name Press Release"
+                    pub_match = re.match(r'(.+?)(?:\s+by\s+|Press Release|$)', rest)
+                    if pub_match:
+                        publication = pub_match.group(1).strip()
+                        # Clean trailing "Press Release" etc
+                        publication = re.sub(r'\s*Press\s*Release\s*$', '', publication).strip()
+                    j += 1; continue
+                # Check for "also covered by" links
+                if nhls and not ntl.startswith('202'):
+                    # Could be "also covered by" links OR next article headline
+                    # If it looks like a new article (has a long headline-like hyperlink), break
+                    if len(nhls[0].get('text', '')) > 30 and nhls[0].get('url', '') and 'back to top' not in ntl:
+                        break
+                    for nh in nhls:
+                        if nh.get('url') and nh.get('text') and 'back to top' not in nh['text'].lower():
+                            also_covered.append(nh)
+                    j += 1; continue
+                # Summary text (no links, not a date line, not a section header)
+                if not nhls and not ntl.startswith('202') and len(ntxt) > 30:
+                    summary_parts.append(ntxt)
+                    j += 1; continue
+                # Unknown — probably next article or section, break
+                break
+
+            summary = ' '.join(summary_parts)[:1500]
+            pub = normalize_publication_name(publication) if publication else ''
+
+            # Check subscription required
+            is_paywall = '(subscription required)' in text.lower() or '(subscription required)' in summary.lower()
+
+            article = {
+                'publication': pub, 'headline': headline, 'url': url,
+                'summary': summary, 'section': current_section,
+                'monitor_date': monitor_date, 'date_published': date_published,
+                'is_translated': False, 'is_paywall': is_paywall, 'is_expansion': False
+            }
+            articles.append(article)
+
+            # Add "also covered by" as expansion articles
+            for ac in also_covered:
+                if ac.get('text') and ac.get('url') and 'back to top' not in ac['text'].lower():
+                    exp = {
+                        'publication': normalize_publication_name(ac['text']),
+                        'headline': headline, 'url': ac['url'],
+                        'summary': summary[:500], 'section': current_section,
+                        'monitor_date': monitor_date, 'date_published': date_published,
+                        'parent_headline': headline, 'parent_summary': summary[:500],
+                        'is_translated': False, 'is_paywall': False, 'is_expansion': True
+                    }
+                    articles.append(exp)
+
+            i = j; continue
+
+        i += 1
+
+    return articles
 
 
 # ============================================================
