@@ -1314,10 +1314,94 @@ def generate_csv(tagged, topics):
 # ============================================================
 # TEMPLATE GENERATOR (Manual Tagging — columns A-E only)
 # ============================================================
-def generate_template_excel(articles, monitor_date):
-    """Generate Excel template with columns A-D populated (parser data).
-    Columns E onwards have headers but are blank for manual analyst tagging.
-    Auto-detects format: Trane-style (brand tabs) vs generic (section tabs)."""
+# ============================================================
+# SIMILARWEB REACH (UVM Desktop + Mobile)
+# ============================================================
+def _extract_domain(url):
+    """Extract root domain from URL. 'https://www.reuters.com/article/...' → 'reuters.com'"""
+    if not url: return ''
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host = parsed.hostname or ''
+        # Remove www prefix
+        if host.startswith('www.'): host = host[4:]
+        return host
+    except: return ''
+
+def fetch_similarweb_reach(domains, api_key):
+    """Fetch Unique Visitors Monthly (UVM) for desktop + mobile from SimilarWeb API.
+    Returns dict: {domain: {'desktop_uv': N, 'mobile_uv': N, 'total_uv': N}}
+    Caches results to avoid duplicate API calls for same domain."""
+    import requests
+    from datetime import datetime, timedelta
+
+    if not api_key or not domains:
+        return {}
+
+    # Determine date range — last full month
+    now = datetime.now()
+    # Go back to first day of previous month
+    first_of_this = now.replace(day=1)
+    last_month_end = first_of_this - timedelta(days=1)
+    last_month_start = last_month_end.replace(day=1)
+    start = last_month_start.strftime('%Y-%m')
+    end = last_month_end.strftime('%Y-%m')
+
+    results = {}
+    unique_domains = list(set(d for d in domains if d and d not in results))
+
+    for domain in unique_domains:
+        if not domain or len(domain) < 4: continue
+        try:
+            # Desktop Unique Visitors
+            desktop_uv = 0
+            r1 = requests.get(
+                f"https://api.similarweb.com/v1/website/{domain}/unique-visitors/desktop_unique_visitors",
+                params={'api_key': api_key, 'start_date': start, 'end_date': end,
+                        'country': 'world', 'granularity': 'monthly', 'main_domain_only': 'false'},
+                timeout=10
+            )
+            if r1.status_code == 200:
+                data = r1.json()
+                for entry in data.get('values', []):
+                    desktop_uv += entry.get('value', 0)
+
+            # Mobile Unique Visitors
+            mobile_uv = 0
+            r2 = requests.get(
+                f"https://api.similarweb.com/v1/website/{domain}/unique-visitors/mobile_unique_visitors",
+                params={'api_key': api_key, 'start_date': start, 'end_date': end,
+                        'country': 'world', 'granularity': 'monthly', 'main_domain_only': 'false'},
+                timeout=10
+            )
+            if r2.status_code == 200:
+                data = r2.json()
+                for entry in data.get('values', []):
+                    mobile_uv += entry.get('value', 0)
+
+            total = desktop_uv + mobile_uv
+            if total > 0:
+                results[domain] = {'desktop_uv': desktop_uv, 'mobile_uv': mobile_uv, 'total_uv': total}
+        except Exception:
+            continue
+
+    return results
+
+def _format_reach(num):
+    """Format large numbers: 1500000 → '1.5M', 250000 → '250K'."""
+    if not num or num == 0: return ''
+    if num >= 1_000_000:
+        return f"{num/1_000_000:.1f}M"
+    elif num >= 1_000:
+        return f"{num/1_000:.0f}K"
+    return str(num)
+
+
+def generate_template_excel(articles, monitor_date, sw_api_key=""):
+    """Generate Excel template with parsed data populated.
+    Auto-detects format: Trane-style (brand tabs) vs generic (section tabs).
+    If SimilarWeb API key provided, fetches reach data."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     wb = Workbook()
@@ -1339,13 +1423,13 @@ def generate_template_excel(articles, monitor_date):
     bd=Border(left=Side(style='thin',color='D9D9D9'),right=Side(style='thin',color='D9D9D9'),top=Side(style='thin',color='D9D9D9'),bottom=Side(style='thin',color='D9D9D9'))
     wb.remove(wb.active)
 
-    def _write_articles_to_sheet(ws, article_list, headers_list):
+    def _write_articles_to_sheet(ws, article_list, headers_list, reach_data=None):
         """Write articles to a worksheet with the specified headers."""
         col_count = len(headers_list)
         for ci,h in enumerate(headers_list,1):
             c=ws.cell(row=1,column=ci,value=h);c.font=hf;c.fill=hfl;c.alignment=Alignment(horizontal='center',wrap_text=True);c.border=bd
         # Column widths
-        widths = {'A':12,'B':16,'C':22,'D':22,'E':55,'F':50,'G':18,'H':12,'I':12,'J':18,'K':18,'L':18,'M':18,'N':30}
+        widths = {'A':12,'B':16,'C':22,'D':22,'E':55,'F':50,'G':18,'H':12,'I':15,'J':18,'K':18,'L':18,'M':18,'N':30}
         for col_letter, w in widths.items():
             ws.column_dimensions[col_letter].width = w
         for ri,art in enumerate(article_list,2):
@@ -1363,7 +1447,14 @@ def generate_template_excel(articles, monitor_date):
             ws.cell(row=ri,column=6,value=art.get('summary','')).font=df                 # F: Summary/Content
             ws.cell(row=ri,column=7,value=art.get('media_type','')).font=df              # G: Media Type
             ws.cell(row=ri,column=8,value='').font=df                                     # H: Sentiment (analyst fills)
-            ws.cell(row=ri,column=9,value='').font=df                                     # I: Reach (SimilarWeb - future)
+            # I: Reach — populate from SimilarWeb if available
+            reach_val = ''
+            if reach_data and url:
+                domain = _extract_domain(url)
+                if domain and domain in reach_data:
+                    rd = reach_data[domain]
+                    reach_val = f"D:{_format_reach(rd.get('desktop_uv',0))} M:{_format_reach(rd.get('mobile_uv',0))}"
+            ws.cell(row=ri,column=9,value=reach_val).font=df
             ws.cell(row=ri,column=10,value='').font=df                                    # J: Main Theme (analyst fills)
             ws.cell(row=ri,column=11,value='').font=df                                    # K: Sub Theme 1
             ws.cell(row=ri,column=12,value='').font=df                                    # L: Sub Theme 2
@@ -1412,7 +1503,13 @@ def generate_template_excel(articles, monitor_date):
             ('No Category Match','Broader industry news')
         ],2):ws_def[f'A{di}']=t;ws_def[f'B{di}']=d
     else:
-        # GENERIC FORMAT: One tab per document section, or single "All Articles" tab
+        # GENERIC FORMAT: One tab per document section
+        # Fetch SimilarWeb reach data if API key available
+        reach_data = {}
+        if sw_api_key:
+            domains = [_extract_domain(a.get('url','')) for a in articles]
+            reach_data = fetch_similarweb_reach(domains, sw_api_key)
+
         sections = {}
         for art in articles:
             sec = art.get('section', 'General')
@@ -1440,11 +1537,11 @@ def generate_template_excel(articles, monitor_date):
             if tab_name in existing:
                 tab_name = tab_name[:28] + f" ({si})"
             ws = wb.create_sheet(tab_name)
-            _write_articles_to_sheet(ws, sec_articles, generic_headers)
+            _write_articles_to_sheet(ws, sec_articles, generic_headers, reach_data)
 
         # Also create an "All Articles" tab with everything
         ws_all = wb.create_sheet("All Articles")
-        _write_articles_to_sheet(ws_all, articles, generic_headers)
+        _write_articles_to_sheet(ws_all, articles, generic_headers, reach_data)
 
     out=BytesIO();wb.save(out);out.seek(0);return out
 
@@ -1526,15 +1623,25 @@ def main():
     with st.sidebar:
         st.markdown("### ⚙️ Configuration")
 
-        # API Key
+        # Claude API Key
         saved_key = ""
         try: saved_key = st.secrets.get("ANTHROPIC_API_KEY", "")
         except Exception: pass
         if saved_key:
             api_key = saved_key
-            st.success("✅ API Key loaded from secrets")
+            st.success("✅ Claude API Key loaded from secrets")
         else:
             api_key = st.text_input("Claude API Key", type="password", help="From console.anthropic.com")
+
+        # SimilarWeb API Key
+        sw_key = ""
+        try: sw_key = st.secrets.get("SIMILARWEB_API_KEY", "")
+        except Exception: pass
+        if sw_key:
+            st.success("✅ SimilarWeb API Key loaded")
+        else:
+            sw_key = st.text_input("SimilarWeb API Key (optional)", type="password", help="For publication reach data")
+        st.session_state['similarweb_key'] = sw_key
 
         st.markdown("---")
 
@@ -1658,7 +1765,7 @@ def main():
                     <div style="font-size:0.75rem;color:#4a5568;margin-top:0.3rem;">Parser fills columns A–D (Monitor Date, Date Published, Publication, Headline with hyperlinks). Columns E onwards are blank for analysts to tag manually.</div>
                 </div>""", unsafe_allow_html=True)
                 sd = md.replace(' ','_').replace('.','') if md else 'report'
-                template_data = generate_template_excel(articles, md)
+                template_data = generate_template_excel(articles, md, st.session_state.get('similarweb_key',''))
                 st.download_button("📋 Download Template Excel", data=template_data,
                     file_name=f"{st.session_state.get('project_name','Report')}_Template_{sd}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
