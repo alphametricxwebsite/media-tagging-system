@@ -542,255 +542,226 @@ def _extract_para_text_and_links(p, hyperlinks, ns):
     return ''.join(parts).strip(), hl_list
 
 
+def _is_social_url(url):
+    """Check if URL is a social media platform."""
+    return any(d in (url or '').lower() for d in ['x.com','twitter.com','facebook.com','instagram.com','reddit.com','linkedin.com'])
+
+def _social_platform_name(url):
+    """Get social media platform name from URL."""
+    ul = (url or '').lower()
+    if 'x.com' in ul or 'twitter.com' in ul: return 'X (Twitter)'
+    if 'facebook.com' in ul: return 'Facebook'
+    if 'instagram.com' in ul: return 'Instagram'
+    if 'reddit.com' in ul: return 'Reddit'
+    if 'linkedin.com' in ul: return 'LinkedIn'
+    return 'Social Media'
+
+def _fmt_date_long(raw):
+    """Convert '2026/04/13' → 'April 13, 2026'."""
+    try:
+        y, m, d = raw.split('/')
+        mn = {'01':'January','02':'February','03':'March','04':'April','05':'May','06':'June',
+              '07':'July','08':'August','09':'September','10':'October','11':'November','12':'December'}
+        return f"{mn.get(m, m)} {int(d)}, {y}"
+    except: return raw
+
+def _parse_source_line(text, headline=''):
+    """Parse '2026/04/13, Pub by Author' → (date, pub, author).
+    Handles cases where link text is prepended or appended."""
+    s = re.sub(r'\(subscription required\)\s*', '', text.strip())
+    if headline and headline in s:
+        # Headline could be at start or end — strip it from both sides
+        idx = s.index(headline)
+        before = s[:idx].strip()
+        after = s[idx+len(headline):].strip()
+        # Use whichever side has the date
+        if re.search(r'\d{4}/\d{2}/\d{2}', before):
+            s = before
+        elif re.search(r'\d{4}/\d{2}/\d{2}', after):
+            s = after
+        else:
+            s = before + ' ' + after  # Try both combined
+    # Find date pattern anywhere in text
+    dm = re.search(r'(\d{4}/\d{2}/\d{2})\s*,\s*(.*)', s)
+    if not dm: return '', '', ''
+    date = _fmt_date_long(dm.group(1))
+    rest = dm.group(2).strip()
+    if not rest: return date, '', ''
+    pr = re.match(r'(.+?)\s+Press\s+Release', rest)
+    if pr: return date, pr.group(1).strip() + ' Press Release', ''
+    by = re.match(r'(.+?)\s+by\s+(.+)', rest)
+    if by: return date, by.group(1).strip(), by.group(2).strip()
+    return date, rest, ''
+
+def _is_article_start(pd):
+    """A paragraph starts a new article if it has a HEADLINE (long link text).
+    Short-link paragraphs (pickup names) are NOT article starts."""
+    rlinks = pd['real_links']
+    if not rlinks: return False
+    # Check if any link has long text (headline) vs short text (pub name)
+    max_link_len = max(len(h.get('text','')) for h in rlinks)
+    if pd['has_date'] and rlinks:
+        # DATE+HL: only if the link text is a headline (>25 chars)
+        return max_link_len > 25
+    if rlinks and not pd['has_date']:
+        # HEADLINE_ONLY: link text must be long enough to be a headline
+        return max_link_len > 25
+    return False
+
+# Also fix: for BeOne articles like P18 "2026/04/13, Oncology Pipeline by Madeleine ArmstrongSGO 2026..."
+# The parse_source line needs to handle the merged headline better
+# And for Pattern A (P11→P12), the lookahead needs to handle DATE+SUMMARY+PICKUPS
+
+# Re-run parser with the fix
+
 def _parse_paragraph_format(body, hyperlinks, ns, monitor_date):
-    """Parse paragraph-based docx format (e.g., pharma daily news).
-    Sections delimited by [Back to Top]. Extracts: headline, publication, author, date, summary, media type."""
     articles = []
     paragraphs = body.findall('./w:p', ns)
     current_section = "General"
-    social_domains = ['x.com', 'twitter.com', 'facebook.com', 'instagram.com', 'reddit.com', 'linkedin.com']
-
-    def _is_social_url(url):
-        if not url: return False
-        ul = url.lower()
-        return any(d in ul for d in social_domains)
-
-    def _social_platform(url):
-        ul = url.lower()
-        if 'x.com' in ul or 'twitter.com' in ul: return 'X (Twitter)'
-        if 'facebook.com' in ul: return 'Facebook'
-        if 'instagram.com' in ul: return 'Instagram'
-        if 'reddit.com' in ul: return 'Reddit'
-        if 'linkedin.com' in ul: return 'LinkedIn'
-        return 'Social Media'
-
-    def _parse_date_long(raw):
-        """Convert '2026/04/13' to 'April 13, 2026'."""
-        try:
-            parts = raw.split('/')
-            month_names = {'01':'January','02':'February','03':'March','04':'April','05':'May','06':'June',
-                          '07':'July','08':'August','09':'September','10':'October','11':'November','12':'December'}
-            return f"{month_names.get(parts[1], parts[1])} {int(parts[2])}, {parts[0]}"
-        except: return raw
-
-    def _extract_author(text):
-        """Extract author from 'Publication by Author Name' pattern."""
-        m = re.search(r'\bby\s+(.+?)$', text)
-        if m:
-            author = m.group(1).strip()
-            # Clean trailing content after author (headline text that follows)
-            # Author names are typically short, stop at unusual patterns
-            # Trim at first uppercase word sequence that looks like a headline
-            return author
-        return ''
-
-    def _extract_pub_author_from_source_line(text):
-        """Parse source line like '2026/04/13, Publication Name by Author NameHeadline...'
-        Returns (date_str, publication, author)."""
-        date_str, publication, author = '', '', ''
-        # Extract date
-        dm = re.match(r'(\d{4}/\d{2}/\d{2})\s*,\s*(.*)', text)
-        if dm:
-            date_str = _parse_date_long(dm.group(1))
-            rest = dm.group(2).strip()
-        else:
-            rest = text.strip()
-
-        # Check for "Publication Press Release" pattern
-        pr_match = re.match(r'(.+?)\s+Press\s+Release(.*)', rest)
-        if pr_match:
-            publication = pr_match.group(1).strip() + ' Press Release'
-            remaining = pr_match.group(2).strip()
-            return date_str, publication, ''
-
-        # Check for "Publication by Author" pattern
-        by_match = re.match(r'(.+?)\s+by\s+(.+)', rest)
-        if by_match:
-            publication = by_match.group(1).strip()
-            author_and_rest = by_match.group(2).strip()
-            # Author is typically names before a headline starts (headline is usually long)
-            # Simple heuristic: take names until we hit something that looks like a headline
-            # Authors are comma-separated names, headlines start with capital word sequences
-            author_parts = []
-            for part in re.split(r'(?<=[a-z])\s*(?=[A-Z][a-z])', author_and_rest, maxsplit=1):
-                if len(part) > 60:  # Likely headline attached
-                    break
-                author_parts.append(part)
-            author = author_parts[0] if author_parts else author_and_rest
-            # Clean author - remove trailing headline fragments
-            author = re.split(r'[A-Z][a-z]+\s+[A-Z]', author)[0].strip() if len(author) > 80 else author
-            return date_str, publication, author
-        
-        # No "by" — just publication name (possibly with headline attached)
-        publication = rest.split('.')[0].strip() if '.' in rest[:40] else rest[:60].strip()
-        return date_str, publication, ''
-
+    
+    pdata = []
+    for p in paragraphs:
+        text, hls = _extract_para_text_and_links(p, hyperlinks, ns)
+        real_links = [h for h in hls if h.get('url') and not h['url'].startswith('#') and 'back to top' not in h.get('text','').lower()]
+        has_date = bool(re.search(r'(\(subscription required\))?\s*\d{4}/\d{2}/\d{2}', text.strip()))
+        pdata.append({'text': text, 'hls': hls, 'real_links': real_links, 'has_date': has_date})
+    
     i = 0
-    while i < len(paragraphs):
-        text, hls = _extract_para_text_and_links(paragraphs[i], hyperlinks, ns)
-        tl = text.lower().strip()
-
-        if not text.strip():
-            i += 1; continue
-
-        # "[Back to Top]" = section boundary
+    while i < len(pdata):
+        text = pdata[i]['text']; tl = text.lower().strip()
+        rlinks = pdata[i]['real_links']; has_date = pdata[i]['has_date']
+        
+        if not text.strip(): i += 1; continue
         if 'back to top' in tl:
-            # Next non-empty paragraph after Back to Top is the new section header
             j = i + 1
-            while j < len(paragraphs):
-                nt, _ = _extract_para_text_and_links(paragraphs[j], hyperlinks, ns)
-                if nt.strip():
-                    # Check if it looks like a section header
-                    if len(nt.strip()) < 100 and not nt.strip().startswith('202'):
-                        current_section = nt.strip()
-                        j += 1
-                    break
+            while j < len(pdata):
+                nt = pdata[j]['text'].strip()
+                if nt and len(nt) < 100 and not re.match(r'\d{4}/', nt) and 'back to top' not in nt.lower():
+                    current_section = nt; j += 1; break
+                elif nt: break
                 j += 1
             i = j; continue
-
-        # Skip table of contents links, view counts, etc.
-        if tl.startswith('|') or re.match(r'^\d+ views$', tl) or tl in ('', 'section highlights top-tier media mentions and key competitive analysis'):
-            i += 1; continue
-
-        # Detect section headers (standalone, no hyperlinks, short)
-        if (len(text) < 100 and not hls and not tl.startswith('(subscription')
-            and not tl.startswith('202') and not any(c.isdigit() for c in text[:4])
-            and text.strip() and len(text.split()) <= 12):
+        if tl.startswith('|') or re.match(r'^\d+ views$', tl) or 'section highlights' in tl: i += 1; continue
+        if tl.startswith('below,') or tl.startswith('materials included') or tl.startswith('tip:'): i += 1; continue
+        if 'tweets of interest' in tl: i += 1; continue
+        
+        # Section header
+        if len(text) < 100 and not rlinks and not has_date and text.strip():
             words = text.strip().split()
-            cap_words = sum(1 for w in words if len(w) > 0 and (w[0].isupper() or w in ('&', 'of', 'and', 'the', 'for', 'in', 'to', 'a')))
-            if cap_words >= len(words) * 0.6 and len(words) >= 2:
-                current_section = text.strip()
-                i += 1; continue
-
-        # Skip "Tweets of interest" header but process tweet articles below
-        if 'tweets of interest' in tl:
+            if 2 <= len(words) <= 12:
+                cap = sum(1 for w in words if w[0].isupper() or w in ('&','of','and','the','for','in','to','a'))
+                if cap >= len(words) * 0.6:
+                    current_section = text.strip(); i += 1; continue
+        
+        if not _is_article_start(pdata[i]) and not has_date:
             i += 1; continue
-
-        # Detect articles: paragraph with a hyperlink (headline link)
-        if hls and hls[0].get('url') and not hls[0]['url'].startswith('#') and 'back to top' not in tl:
-            headline = hls[0]['text'] or text
-            url = hls[0]['url']
-            publication = ''
-            author = ''
-            date_published = ''
-            summary_parts = []
-            pickup_links = []
-            is_paywall = '(subscription required)' in tl
-
-            # Determine media type
-            if _is_social_url(url):
-                media_type = _social_platform(url)
-            else:
-                media_type = ''  # Will determine below based on summary presence
-
-            # Check if headline paragraph also contains source line (merged text)
-            # Pattern: "2026/04/13, Source by AuthorHeadline text" all in one paragraph
-            source_in_headline = re.match(r'(\d{4}/\d{2}/\d{2})\s*,\s*(.+)', text)
-            if source_in_headline:
-                date_published = _parse_date_long(source_in_headline.group(1))
-                rest = source_in_headline.group(2)
-                # Try to separate publication/author from headline
-                # The headline is usually the hyperlinked part
-                non_hl_text = text.replace(headline, '').strip()
-                if non_hl_text:
-                    _, pub_temp, auth_temp = _extract_pub_author_from_source_line(text.replace(headline, ''))
-                    if not publication and pub_temp: publication = pub_temp
-                    if not author and auth_temp: author = auth_temp
-
-            # Look at subsequent paragraphs for source line, summary, and pickup links
-            j = i + 1
-            has_summary = False
-            while j < len(paragraphs):
-                ntxt, nhls = _extract_para_text_and_links(paragraphs[j], hyperlinks, ns)
-                ntl = ntxt.lower().strip()
-
-                if not ntxt.strip():
-                    j += 1; continue
-
-                # Back to Top = section boundary, stop
-                if 'back to top' in ntl:
-                    break
-
-                # Source/date line: "2026/04/13, Publication by Author"
-                if re.match(r'\d{4}/\d{2}/\d{2}', ntxt.strip()) and not date_published:
-                    d, p, a = _extract_pub_author_from_source_line(ntxt.strip())
-                    if d: date_published = d
-                    if p and not publication: publication = p
-                    if a and not author: author = a
-                    j += 1; continue
-
-                # Also check for "(subscription required)2026/04/13, ..." pattern
-                sub_match = re.match(r'\(subscription required\)\s*(\d{4}/\d{2}/\d{2})\s*,\s*(.*)', ntxt.strip(), re.IGNORECASE)
-                if sub_match:
-                    # This is the START of a new article (paywall), break
-                    break
-
-                # Links without long headline text = pickup links
-                if nhls and not ntl.startswith('202'):
-                    # Check if this looks like a new article headline (long text with link)
-                    first_hl = nhls[0]
-                    if len(first_hl.get('text', '')) > 30 and first_hl.get('url', ''):
-                        break  # New article, stop
-                    # Otherwise these are pickup/also-covered links
-                    for nh in nhls:
-                        if nh.get('url') and nh.get('text') and 'back to top' not in nh['text'].lower():
-                            pickup_links.append(nh)
-                    j += 1; continue
-
-                # Summary text (no links, not a date line, substantial text)
-                if not nhls and not re.match(r'\d{4}/\d{2}/\d{2}', ntxt.strip()) and len(ntxt) > 20:
-                    summary_parts.append(ntxt)
-                    has_summary = True
-                    j += 1; continue
-
-                # Short non-link text (e.g., view counts) — skip
-                if len(ntxt) < 20:
-                    j += 1; continue
-
+        
+        # ════ ARTICLE START ════
+        headline, url, publication, author, date_published = '', '', '', '', ''
+        summary_parts, pickup_links = [], []
+        is_paywall = '(subscription required)' in tl
+        
+        if has_date and rlinks:
+            headline = rlinks[0]['text']; url = rlinks[0]['url']
+            d, p, a = _parse_source_line(text, headline)
+            date_published, publication, author = d, p, a
+            for h in rlinks[1:]: pickup_links.append(h)
+        elif rlinks:
+            headline = rlinks[0]['text']; url = rlinks[0]['url']
+        
+        j = i + 1
+        got_source = bool(date_published)
+        while j < len(pdata):
+            npd = pdata[j]; nt = npd['text'].strip(); ntl = nt.lower()
+            if not nt: j += 1; continue
+            if 'back to top' in ntl: break
+            if re.match(r'^\d+ views$', ntl): j += 1; continue
+            
+            # New article start → stop
+            if _is_article_start(npd):
                 break
-
-            summary = ' '.join(summary_parts)[:2000]
-
-            # Determine media type based on summary presence
-            if not media_type:
-                if has_summary:
-                    media_type = 'Main Article'
+            
+            # DATE_ONLY: source line
+            if npd['has_date'] and not npd['real_links']:
+                if not got_source:
+                    d, p, a = _parse_source_line(nt)
+                    if d: date_published = d
+                    if p: publication = p
+                    if a: author = a
+                    got_source = True
                 else:
-                    media_type = 'Similar News/Pickups'
-
-            # Clean publication
-            pub = normalize_publication_name(publication) if publication else ''
-            # Remove "(subscription required)" from beginning of headline
-            headline = re.sub(r'^\(subscription required\)\s*', '', headline, flags=re.IGNORECASE).strip()
-
-            article = {
-                'publication': pub, 'headline': headline, 'url': url,
-                'summary': summary, 'author': author, 'section': current_section,
-                'monitor_date': monitor_date, 'date_published': date_published,
-                'media_type': media_type,
-                'is_translated': False, 'is_paywall': is_paywall, 'is_expansion': False
-            }
-            articles.append(article)
-
-            # Add pickup/also-covered links as separate entries
-            for ac in pickup_links:
-                if ac.get('text') and ac.get('url') and 'back to top' not in ac['text'].lower():
-                    ac_media = _social_platform(ac['url']) if _is_social_url(ac['url']) else 'Similar News/Pickups'
-                    exp = {
-                        'publication': normalize_publication_name(ac['text']),
-                        'headline': headline, 'url': ac['url'],
-                        'summary': '', 'author': '', 'section': current_section,
-                        'monitor_date': monitor_date, 'date_published': date_published,
-                        'parent_headline': headline, 'parent_summary': summary[:500],
-                        'media_type': ac_media,
-                        'is_translated': False, 'is_paywall': False, 'is_expansion': True
-                    }
-                    articles.append(exp)
-
-            i = j; continue
-
-        i += 1
-
+                    break  # Second DATE_ONLY = next article's source
+                j += 1; continue
+            
+            # DATE+links where links are SHORT = source+summary+pickups (Pattern A)
+            if npd['has_date'] and npd['real_links']:
+                max_ll = max(len(h.get('text','')) for h in npd['real_links'])
+                if max_ll <= 25:
+                    # All links are short pickup names → this is a source+summary+pickups para
+                    if not got_source:
+                        d, p, a = _parse_source_line(nt, '')
+                        if d: date_published = d
+                        if p: publication = p
+                        if a: author = a
+                        got_source = True
+                    # Extract summary text after the date+pub prefix
+                    stripped = re.sub(r'^(\(subscription required\))?\s*\d{4}/\d{2}/\d{2}\s*,\s*', '', nt)
+                    if publication:
+                        for pfx in [publication, publication.replace(' Press Release','')]:
+                            if pfx and stripped.startswith(pfx):
+                                stripped = stripped[len(pfx):].strip()
+                    if stripped and len(stripped) > 15: summary_parts.append(stripped)
+                    for h in npd['real_links']: pickup_links.append(h)
+                    j += 1; continue
+                else:
+                    break  # Long link = new article
+            
+            # Links with short text = pickups inside summary
+            if npd['real_links'] and not npd['has_date']:
+                max_ll = max(len(h.get('text','')) for h in npd['real_links'])
+                if max_ll <= 25:
+                    for h in npd['real_links']: pickup_links.append(h)
+                    plain = nt
+                    for h in npd['hls']: plain = plain.replace(h.get('text',''), '')
+                    plain = plain.strip()
+                    if plain and len(plain) > 15: summary_parts.append(plain)
+                    j += 1; continue
+                else:
+                    break  # Long link text = new article headline
+            
+            # Plain text = summary
+            if len(nt) > 15 and not npd['real_links']:
+                summary_parts.append(nt); j += 1; continue
+            
+            j += 1
+        
+        i = j
+        summary = ' '.join(summary_parts)[:2000]
+        has_summary = bool(summary_parts)
+        if _is_social_url(url): media_type = _social_platform_name(url)
+        elif has_summary: media_type = 'Main Article'
+        else: media_type = 'Similar News/Pickups'
+        
+        headline = re.sub(r'^\(subscription required\)\s*', '', headline).strip()
+        pub = normalize_publication_name(publication)
+        
+        articles.append({
+            'publication': pub, 'headline': headline, 'url': url,
+            'summary': summary, 'author': author, 'section': current_section,
+            'monitor_date': monitor_date, 'date_published': date_published,
+            'media_type': media_type, 'is_translated': False, 'is_paywall': is_paywall, 'is_expansion': False
+        })
+        for pk in pickup_links:
+            if pk.get('text') and pk.get('url'):
+                pk_m = _social_platform_name(pk['url']) if _is_social_url(pk['url']) else 'Similar News/Pickups'
+                articles.append({
+                    'publication': normalize_publication_name(pk['text']),
+                    'headline': headline, 'url': pk['url'],
+                    'summary': '', 'author': '', 'section': current_section,
+                    'monitor_date': monitor_date, 'date_published': date_published,
+                    'parent_headline': headline, 'parent_summary': summary[:500],
+                    'media_type': pk_m, 'is_translated': False, 'is_paywall': False, 'is_expansion': True
+                })
     return articles
 
 
