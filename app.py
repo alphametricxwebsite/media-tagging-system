@@ -704,13 +704,16 @@ def _parse_paragraph_format(body, hyperlinks, ns, monitor_date):
                         if p: publication = p
                         if a: author = a
                         got_source = True
-                    # Extract summary text after the date+pub prefix
-                    stripped = re.sub(r'^(\(subscription required\))?\s*\d{4}/\d{2}/\d{2}\s*,\s*', '', nt)
-                    if publication:
-                        for pfx in [publication, publication.replace(' Press Release','')]:
-                            if pfx and stripped.startswith(pfx):
-                                stripped = stripped[len(pfx):].strip()
-                    if stripped and len(stripped) > 15: summary_parts.append(stripped)
+                    # Extract summary: find date position, take text AFTER date+pub
+                    dm_pos = re.search(r'\d{4}/\d{2}/\d{2}\s*,\s*', nt)
+                    if dm_pos:
+                        after_date = nt[dm_pos.end():]
+                        # Strip publication prefix from summary
+                        if publication:
+                            for pfx in [publication, publication.replace(' Press Release','')]:
+                                if pfx and after_date.startswith(pfx):
+                                    after_date = after_date[len(pfx):].strip()
+                        if after_date and len(after_date) > 15: summary_parts.append(after_date)
                     for h in npd['real_links']: pickup_links.append(h)
                     j += 1; continue
                 else:
